@@ -1,0 +1,39 @@
+{
+  "name": "siyuan-plugin-onlyoffice-bridge",
+  "author": "b8l8u8e8",
+  "url": "https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge",
+  "version": "1.0.0",
+  "minAppVersion": "3.5.10",
+  "disabledInPublish": false,
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "desktop",
+    "browser-desktop"
+  ],
+  "displayName": {
+    "default": "ONLYOFFICE Bridge",
+    "zh_CN": "ONLYOFFICE 文档桥"
+  },
+  "description": {
+    "default": "Preview and edit Office documents (docx, xlsx, pptx, pdf…) via ONLYOFFICE with auto-save back to SiYuan attachments.",
+    "zh_CN": "通过 ONLYOFFICE 预览和编辑 Office 文档（docx、xlsx、pptx、pdf 等），编辑后自动保存回思源附件。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README_zh_CN.md"
+  },
+  "keywords": [
+    "onlyoffice",
+    "office",
+    "preview",
+    "edit",
+    "attachment",
+    "docx",
+    "xlsx",
+    "pptx",
+    "pdf",
+    "bridge"
+  ]
+}

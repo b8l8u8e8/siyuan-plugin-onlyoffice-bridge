@@ -1,0 +1,13 @@
+{
+  "name": "onlyoffice-bridge-server",
+  "version": "1.0.0",
+  "description": "Bridge server for SiYuan ONLYOFFICE plugin – proxies assets, serves editor pages, handles save callbacks",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "license": "MIT"
+}
