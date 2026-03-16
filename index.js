@@ -427,6 +427,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
     this._dialogs.clear();
   }
 
+  uninstall() {
+    // Delete persisted plugin data when uninstalling.
+    this.removeData(STORAGE_KEY).catch((err) => {
+      console.warn(`[Office Editor] uninstall removeData("${STORAGE_KEY}") failed:`, err);
+    });
+  }
+
   _registerCustomTab() {
     if (this._tabRegistered) return;
     const plugin = this;
