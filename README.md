@@ -1,132 +1,109 @@
-# ONLYOFFICE Bridge for SiYuan
+# 📝 Office Editor 
 
-Preview and edit Office files (docx/xlsx/pptx/pdf, etc.) in SiYuan using ONLYOFFICE.
+**Office Editor** is a SiYuan Note plugin that allows you to **preview and edit Office documents directly inside SiYuan** — including Word, Excel, PowerPoint, PDF, and 20+ formats, powered by ONLYOFFICE.
 
-This plugin is designed for:
-- ONLYOFFICE + Bridge on a **public server**
-- SiYuan desktop or Docker web on a **private network**
+🌍 Document Language:  
+[中文 README](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_zh_CN.md) ｜ [English README](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README.md)
 
-The browser relays file sync, so Bridge does not need direct access to private-network SiYuan.
+---
 
-## What changed in this version
+## 🚀 Plugin Features
 
-- Added plugin setting: **ONLYOFFICE URL (optional)**
-- Better error hint for upload `HTTP 404`
-- Bridge now supports reverse-proxy sub-paths (example: `/bridge/upload`)
-- Bridge supports separate ONLYOFFICE internal/public URLs:
-  - `ONLYOFFICE_INTERNAL_URL` for bridge-side connectivity
-  - `ONLYOFFICE_PUBLIC_URL` for browser-side `api.js` loading
+📄 **Rich Format Support**
 
-## Architecture (push model)
+Preview and edit docx, xlsx, pptx, pdf, odt, csv, rtf, txt, md, and 20+ other formats.
 
-1. Plugin reads attachment from SiYuan (browser -> SiYuan)
-2. Plugin uploads file to Bridge (`POST /upload`)
-3. ONLYOFFICE reads file from Bridge (`GET /proxy/<asset>`)
-4. User saves in ONLYOFFICE
-5. ONLYOFFICE callback -> Bridge (`POST /callback`)
-6. Plugin pulls saved file (`GET /saved`) and writes back to SiYuan
+✏️ **Automatic Save Back**
 
-## Quick deployment (public server)
+Content edited in ONLYOFFICE will **automatically sync back to SiYuan attachments** — no manual action required.
 
-Use `docker-compose.example.yml` in this repo.
+📱 **Cross-Platform Support**
 
-Key environment variables for `bridge`:
+Supports preview + editing, and documents can be opened in popup, embedded, or tab mode.
 
-- `ONLYOFFICE_INTERNAL_URL=http://onlyoffice:80`
-- `ONLYOFFICE_PUBLIC_URL=http://YOUR_SERVER_IP:8080`
-- `BRIDGE_URL=http://YOUR_SERVER_IP:6789`
-- `BRIDGE_SECRET=` (optional)
+---
 
-Run:
+## ✨ Usage
 
-```bash
-docker compose up -d
-```
+### 📌 Quick Start
 
-## Plugin settings
+1️⃣ Deploy ONLYOFFICE + Bridge service → See the [Docker Deployment Guide](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md)
 
-Open plugin settings in SiYuan and set:
+2️⃣ Install this plugin from the SiYuan marketplace
 
-- **Bridge URL** (required)
-  - Example: `http://YOUR_SERVER_IP:6789`
-- **ONLYOFFICE URL (optional)**
-  - Example: `http://YOUR_SERVER_IP:8080`
-  - If empty, bridge server config is used.
-- **Bridge secret (optional)**
-  - Must match `BRIDGE_SECRET` on server.
+3️⃣ Open the plugin settings and fill in the **Bridge address**
 
-## Reverse proxy / sub-path deployment
+4️⃣ Right-click an Office attachment link in a document → Choose **Preview** or **Edit**
 
-If Bridge is exposed as a sub-path (example `https://example.com/bridge`):
+### 📌 Open Modes
 
-1. Set plugin **Bridge URL** to `https://example.com/bridge`
-2. Set bridge env `BRIDGE_BASE_PATH=/bridge` (recommended)
-3. Or set `BRIDGE_URL=https://example.com/bridge`
+- **Popup Mode**: Right-click menu → “Preview (Popup)” or “Edit (Popup)” to open in a popup
+- **Embedded Mode**: Right-click menu → “Preview (Embed in Current Page)” or “Edit (Embed in Current Page)” to embed into the current document
+- **Tab Mode**: Right-click menu → “Preview (New Tab)” or “Edit (New Tab)” to open in a SiYuan tab
 
-Bridge now accepts both root and prefixed endpoints:
-- `/upload` and `/bridge/upload`
-- `/editor` and `/bridge/editor`
-- etc.
+---
 
-## Bridge environment variables
+## ⚙️ Plugin Settings
 
-| Variable | Default | Description |
-|---|---|---|
-| `BRIDGE_PORT` | `6789` | Listen port |
-| `ONLYOFFICE_INTERNAL_URL` | `ONLYOFFICE_URL` or `http://127.0.0.1:8080` | Bridge-side ONLYOFFICE URL |
-| `ONLYOFFICE_PUBLIC_URL` | empty | Browser-side ONLYOFFICE URL for loading `api.js` |
-| `BRIDGE_URL` | empty | External bridge URL used to generate callback/proxy links |
-| `BRIDGE_BASE_PATH` | inferred from `BRIDGE_URL` path | Optional reverse-proxy path prefix |
-| `BRIDGE_SECRET` | empty | Shared secret |
-| `SIYUAN_URL` | empty | Optional direct SiYuan URL (co-located setup) |
-| `SIYUAN_TOKEN` | empty | Optional SiYuan token |
+| Setting                | Description                                                  |
+| ---------------------- | ------------------------------------------------------------ |
+| **Bridge Address**     | Required. Default `http://127.0.0.1:6789` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy |
+| **ONLYOFFICE Address** | Optional. Default `http://127.0.0.1:7070` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy. If empty, the Bridge server configuration will be used |
+| **Bridge Secret**      | Optional. Must match the server `BRIDGE_SECRET`. Leave empty to disable |
 
-## API endpoints
+---
 
-- `GET /health`
-- `POST /upload?asset=<path>`
-- `GET /proxy/<path>`
-- `GET /editor`
-- `POST /callback`
-- `GET /saved?asset=<path>`
-- `POST /cleanup?asset=<path>`
+## ⚠️ Notes
 
-All endpoints also work under configured/prefixed base path.
+- **PDF files** support preview only, editing is not supported
+- Edited files will **automatically sync back** to SiYuan attachments. Please ensure saving is completed before closing the editor
+- When saving, the file **must not be occupied by other programs** such as local Office or WPS, otherwise saving may fail
 
-## Troubleshooting
+---
 
-### Upload failed: `Bridge returned HTTP 404`
+## 📸 Video Demo (Hosted on GitHub, loading may require a proxy)
 
-Usually one of these:
+<video controls width="600">
+  <source src="https://github.com/user-attachments/assets/dc9e24f1-21d3-4b4e-96e5-5c2013c26ef9" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
-1. Bridge URL points to ONLYOFFICE (`:8080`) instead of Bridge (`:6789`)
-2. Reverse proxy sub-path is not configured correctly
-3. Bridge service is not reachable from your browser
+---
 
-Checks:
+## ☕ Support the Author
 
-```bash
-curl http://YOUR_BRIDGE/health
-curl http://YOUR_BRIDGE/health?detail=true
-```
+If you find this project helpful, feel free to support the author ❤️  
+Your support will encourage me to **continue maintaining and improving** this tool.
 
-### ONLYOFFICE editor page cannot load
+<div align="center">
+    <a href="https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge">
+        <img src="https://img.shields.io/github/stars/b8l8u8e8/siyuan-plugin-onlyoffice-bridge?style=for-the-badge&color=ffd700&label=Give%20a%20Star" alt="Github Star">
+    </a>
+</div>
 
-If using Docker, do not rely on `ONLYOFFICE_INTERNAL_URL` for browser loading.
-Set `ONLYOFFICE_PUBLIC_URL` to a browser-reachable address (or fill plugin ONLYOFFICE URL).
+<div align="center" style="margin-top: 40px;">
+    <div style="display: flex; justify-content: center; align-items: center; gap: 30px;">
+        <div style="text-align: center;">
+            <img src="https://github.com/user-attachments/assets/81d0a064-b760-4e97-9c9b-bf83f6cafc8a" 
+                 style="height: 280px; width: auto; border-radius: 10px; border: 2px solid #07c160;">
+            <br/>
+            <b style="color: #07c160; margin-top: 10px; display: block;">WeChat Pay</b>
+        </div>
+        <div style="text-align: center;">
+            <img src="https://github.com/user-attachments/assets/9e1988d0-4016-4b8d-9ea6-ce8ff714ee17" 
+                 style="height: 280px; width: auto; border-radius: 10px; border: 2px solid #1677ff;">
+            <br/>
+            <b style="color: #1677ff; margin-top: 10px; display: block;">Alipay</b>
+        </div>
+    </div>
+    <p style="margin-top: 20px;"><i>Your support is the biggest motivation for continuous iteration 🙏</i></p>
+</div>
 
-### Edits are not saved back
+---
 
-- Check bridge logs
-- Ensure callback URL is externally reachable by ONLYOFFICE
-- Keep `BRIDGE_URL` / base path consistent with actual public entry
+## 📖 More Information
 
-## Security notes
-
-- Set `BRIDGE_SECRET` in production
-- Use HTTPS behind reverse proxy
-- Asset paths are validated to prevent traversal
-
-## License
-
-MIT
+- 🐳 Deployment Guide：[Docker Deployment Guide](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md) 
+- 🐞 Issue Tracker：[GitHub Issues](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/issues)
+- 📄 License：[MIT License](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/LICENSE)
+- 🧾 Changelog：[CHANGELOG.md](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/CHANGELOG.md)

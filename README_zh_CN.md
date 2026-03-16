@@ -1,132 +1,111 @@
-# 思源笔记 ONLYOFFICE Bridge
+# 📝 Office 编辑器（Office Editor）
 
-在思源中直接预览和编辑 Office 文档（docx/xlsx/pptx/pdf 等），通过 ONLYOFFICE + Bridge 实现。
+**Office 编辑器** 是一款思源笔记插件，让你在思源中**直接预览和编辑 Office 文档**——Word、Excel、PowerPoint、PDF 等 20+ 格式，基于 ONLYOFFICE 实现。
 
-适用场景：
-- ONLYOFFICE + Bridge 部署在公网服务器
-- 思源桌面版或 Docker 网页版可能在私网
+🌍 文档语言：
+[中文 README](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_zh_CN.md) ｜ [English README](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README.md)
 
-浏览器承担中转角色，因此 Bridge 不需要直连私网中的思源。
+---
 
-## 本次修复点
+## 🚀 插件优势
 
-- 新增插件设置：**ONLYOFFICE 地址（可选）**
-- 上传失败 `HTTP 404` 给出更明确提示
-- Bridge 支持反向代理子路径（例如 `/bridge/upload`）
-- Bridge 拆分 ONLYOFFICE 内外网地址：
-  - `ONLYOFFICE_INTERNAL_URL`：Bridge 服务端连通用
-  - `ONLYOFFICE_PUBLIC_URL`：浏览器加载 `api.js` 用
+📄 **丰富的格式支持**
 
-## 架构（Push 模式）
+预览和编辑 docx、xlsx、pptx、pdf、odt、csv、rtf、txt、md 等 20+ 格式。
 
-1. 插件从思源读取附件（浏览器 -> 思源）
-2. 插件上传文档到 Bridge（`POST /upload`）
-3. ONLYOFFICE 从 Bridge 读取文档（`GET /proxy/<asset>`）
-4. 用户在 ONLYOFFICE 中保存
-5. ONLYOFFICE 回调 Bridge（`POST /callback`）
-6. 插件从 Bridge 拉取已保存版本（`GET /saved`）并写回思源
+✏️ **自动保存回写**
 
-## 快速部署（公网服务器）
+在 ONLYOFFICE 中编辑的内容会**自动同步回思源附件**——无需手动操作。
 
-仓库内 `docker-compose.example.yml` 已更新，可直接参考。
+📱 **全平台覆盖**
 
-Bridge 关键环境变量：
+支持预览 + 编辑，可在弹窗、嵌入当前页或标签页中打开文档。
 
-- `ONLYOFFICE_INTERNAL_URL=http://onlyoffice:80`
-- `ONLYOFFICE_PUBLIC_URL=http://你的公网IP:8080`
-- `BRIDGE_URL=http://你的公网IP:6789`
-- `BRIDGE_SECRET=`（可选）
+---
 
-启动：
+## ✨ 使用方法
 
-```bash
-docker compose up -d
-```
+### 📌 快速开始
 
-## 插件设置
+1️⃣ 部署 ONLYOFFICE + Bridge 服务→ 参考 [Docker 部署指南](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md)
 
-在思源插件设置中填写：
+2️⃣ 在思源集市安装本插件
 
-- **Bridge 地址**（必填）
-  - 例如：`http://你的公网IP:6789`
-- **ONLYOFFICE 地址（可选）**
-  - 例如：`http://你的公网IP:8080`
-  - 留空则使用 Bridge 服务端配置
-- **Bridge 密钥（可选）**
-  - 需与服务端 `BRIDGE_SECRET` 一致
+3️⃣ 打开插件设置，填写 **Bridge 地址**
 
-## 反向代理 / 子路径部署
+4️⃣ 在文档中右键点击 Office 附件链接 → 选择**预览**或**编辑**
 
-如果你把 Bridge 暴露为子路径（例如 `https://example.com/bridge`）：
+### 📌 打开方式
 
-1. 插件 Bridge 地址填 `https://example.com/bridge`
-2. Bridge 推荐设置 `BRIDGE_BASE_PATH=/bridge`
-3. 或者 `BRIDGE_URL=https://example.com/bridge`
+- **弹窗模式**：右键菜单选择「预览（弹窗）」或「编辑（弹窗）」，在弹窗中打开
+- **嵌入模式**：右键菜单选择「预览（嵌入当前页）」或「编辑（嵌入当前页）」，嵌入到当前文档中
+- **标签页模式**：右键菜单选择「预览（新标签页）」或「编辑（新标签页）」，在思源标签页中打开
 
-当前版本同时兼容根路径和子路径：
-- `/upload` 与 `/bridge/upload`
-- `/editor` 与 `/bridge/editor`
-- 其余端点同理
+---
 
-## Bridge 环境变量
+## ⚙️ 插件设置
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `BRIDGE_PORT` | `6789` | Bridge 监听端口 |
-| `ONLYOFFICE_INTERNAL_URL` | `ONLYOFFICE_URL` 或 `http://127.0.0.1:8080` | Bridge 服务端访问 ONLYOFFICE 的地址 |
-| `ONLYOFFICE_PUBLIC_URL` | 空 | 浏览器可访问的 ONLYOFFICE 地址（用于加载 `api.js`） |
-| `BRIDGE_URL` | 空 | Bridge 对外地址（用于生成 callback/proxy 链接） |
-| `BRIDGE_BASE_PATH` | 从 `BRIDGE_URL` path 推断 | 可选：反向代理子路径前缀 |
-| `BRIDGE_SECRET` | 空 | 共享密钥 |
-| `SIYUAN_URL` | 空 | 可选：Bridge 可直连思源时使用 |
-| `SIYUAN_TOKEN` | 空 | 可选：思源 token |
+| 设置项 | 说明 |
+|--------|------|
+| **Bridge 地址** | 必填。默认 `http://127.0.0.1:6789`（仅当前设备可用）；跨设备请改为浏览器可访问的内网地址，公网请走反向代理 |
+| **ONLYOFFICE 地址** | 可选。默认 `http://127.0.0.1:7070`（仅当前设备可用）；跨设备请改为浏览器可访问的内网地址，公网请走反向代理。留空则使用 Bridge 服务端配置 |
+| **Bridge 密钥** | 可选。需与服务端 `BRIDGE_SECRET` 一致，留空则不启用 |
 
-## API 端点
+---
 
-- `GET /health`
-- `POST /upload?asset=<path>`
-- `GET /proxy/<path>`
-- `GET /editor`
-- `POST /callback`
-- `GET /saved?asset=<path>`
-- `POST /cleanup?asset=<path>`
+## ⚠️ 注意事项
 
-这些端点在子路径模式下同样可用。
+- **PDF 文件**仅支持预览，不支持编辑
+- 编辑后的文件会**自动回写**到思源附件，关闭编辑器前请确保保存完毕
+- 保存时，对应文件请**不要有其他程序占用**，例如本机的office程序、WPS，会导致保存失败
 
-## 常见问题
+---
 
-### 上传失败：`Bridge returned HTTP 404`
+## 📸 视频演示（视频源自 GitHub，加载可能需“魔法”）
 
-通常是以下原因之一：
+<video controls width="600">
+  <source src="https://github.com/user-attachments/assets/dc9e24f1-21d3-4b4e-96e5-5c2013c26ef9" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
-1. Bridge 地址填成了 ONLYOFFICE（`:8080`），而不是 Bridge（`:6789`）
-2. 反向代理子路径未正确转发
-3. 浏览器无法访问 Bridge
+---
 
-先检查：
+## ☕ 支持作者
 
-```bash
-curl http://你的Bridge地址/health
-curl http://你的Bridge地址/health?detail=true
-```
+如果你觉得这个项目对你有帮助，欢迎支持作者 ❤️  
+你的支持将激励我 **持续维护与优化**，打造更好用的工具。
 
-### 编辑器页面加载失败
+<div align="center">
+    <a href="https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge">
+        <img src="https://img.shields.io/github/stars/b8l8u8e8/siyuan-plugin-onlyoffice-bridge?style=for-the-badge&color=ffd700&label=%E7%BB%99%E4%B8%AAStar%E5%90%A7" alt="Github Star">
+    </a>
+</div>
 
-Docker 场景下不要只配置 `ONLYOFFICE_INTERNAL_URL=http://onlyoffice:80`。
-还需要设置 `ONLYOFFICE_PUBLIC_URL`，或者在插件里填写 ONLYOFFICE 地址。
 
-### 编辑后没有回写到思源
+<div align="center" style="margin-top: 40px;">
+    <div style="display: flex; justify-content: center; align-items: center; gap: 30px;">
+        <div style="text-align: center;">
+            <img src="https://github.com/user-attachments/assets/81d0a064-b760-4e97-9c9b-bf83f6cafc8a" 
+                 style="height: 280px; width: auto; border-radius: 10px; border: 2px solid #07c160;">
+            <br/>
+            <b style="color: #07c160; margin-top: 10px; display: block;">微信支付</b>
+        </div>
+        <div style="text-align: center;">
+            <img src="https://github.com/user-attachments/assets/9e1988d0-4016-4b8d-9ea6-ce8ff714ee17" 
+                 style="height: 280px; width: auto; border-radius: 10px; border: 2px solid #1677ff;">
+            <br/>
+            <b style="color: #1677ff; margin-top: 10px; display: block;">支付宝</b>
+        </div>
+    </div>
+    <p style="margin-top: 20px;"><i>你的支持，是我持续迭代的最大动力 🙏</i></p>
+</div>
 
-- 检查 bridge 日志
-- 确保 ONLYOFFICE 能访问 callback 地址
-- 确保 `BRIDGE_URL` / 子路径与实际公网入口一致
+---
 
-## 安全建议
+## 📖 更多信息
 
-- 生产环境建议设置 `BRIDGE_SECRET`
-- 建议通过 HTTPS 访问
-- Bridge 已对附件路径做安全校验
+- 🐳 部署指南：[Docker 部署指南](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md) 
+- 🐞 问题反馈：[GitHub Issues](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/issues)
+- 📄 开源协议：[MIT License](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/LICENSE)
+- 🧾 更新日志：[CHANGELOG.md](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/CHANGELOG.md)
 
-## 许可证
-
-MIT
