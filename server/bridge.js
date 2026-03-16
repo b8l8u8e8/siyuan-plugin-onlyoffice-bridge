@@ -84,6 +84,30 @@ function normalizeBridgeUrlFromEnv(v) {
   return raw;
 }
 
+function parsePositiveInt(v, fallback) {
+  const parsed = parseInt(String(v ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function parseBool(v, fallback = false) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "1" || s === "true" || s === "yes" || s === "on") return true;
+  if (s === "0" || s === "false" || s === "no" || s === "off") return false;
+  return !!fallback;
+}
+
+function normalizeTenantId(v, fallback = "") {
+  const raw = String(v || "").trim();
+  if (!raw) return fallback;
+  const cleaned = raw
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned || fallback;
+}
+
 const bridgeUrlRawFromEnv = trimRightSlash(process.env.BRIDGE_URL || "");
 const bridgeUrlFromEnv = normalizeBridgeUrlFromEnv(bridgeUrlRawFromEnv);
 const CONFIG = {
@@ -91,23 +115,29 @@ const CONFIG = {
   siyuanUrl:             trimRightSlash(process.env.SIYUAN_URL || ""),
   siyuanToken:           process.env.SIYUAN_TOKEN || "",
   // Internal address for bridge-side checks/calls (container network, localhost, etc.)
-  onlyofficeInternalUrl: trimRightSlash(process.env.ONLYOFFICE_INTERNAL_URL || process.env.ONLYOFFICE_URL || "http://127.0.0.1:8080"),
+  onlyofficeInternalUrl: trimRightSlash(process.env.ONLYOFFICE_INTERNAL_URL || process.env.ONLYOFFICE_URL || "http://127.0.0.1:7070"),
   // Browser-accessible address for loading ONLYOFFICE api.js in editor page
   onlyofficePublicUrl:   trimRightSlash(process.env.ONLYOFFICE_PUBLIC_URL || process.env.ONLYOFFICE_BROWSER_URL || ""),
   bridgeUrl:             bridgeUrlFromEnv,
   bridgeBasePath:        normalizeBasePath(process.env.BRIDGE_BASE_PATH || inferBasePathFromUrl(bridgeUrlFromEnv)),
   bridgeSecret:          process.env.BRIDGE_SECRET || "",
+  defaultTenant:         normalizeTenantId(process.env.BRIDGE_DEFAULT_TENANT || "default", "default"),
+  requireTenant:         parseBool(process.env.BRIDGE_REQUIRE_TENANT || "false", false),
+  maxFileMB:             parsePositiveInt(process.env.MAX_FILE_MB || process.env.MAX_UPLOAD_MB, 512),
+  maxChunkMB:            parsePositiveInt(process.env.MAX_CHUNK_MB, 8),
 };
 
 // ---------------------------------------------------------------------------
 // In-memory file store
-// key: assetPath (e.g. "assets/example.docx")
-// value: { buffer, contentType, dirty, lastAccess }
+// key: `${tenant}::${assetPath}` (e.g. "team-a::assets/example.docx")
+// value: { buffer, contentType, dirty, version, lastAccess }
 //   dirty=true means ONLYOFFICE saved a new version that the plugin has not yet
 //   pulled back to SiYuan.
 // ---------------------------------------------------------------------------
 const fileStore = new Map();
+const chunkUploadStore = new Map();
 const FILE_TTL = 2 * 60 * 60 * 1000; // 2 hours
+const CHUNK_UPLOAD_TTL = 30 * 60 * 1000; // 30 minutes
 
 // Auto-cleanup stale file entries every 10 minutes
 setInterval(() => {
@@ -116,6 +146,12 @@ setInterval(() => {
     if (now - val.lastAccess > FILE_TTL) {
       fileStore.delete(key);
       log(`Auto-cleanup: expired file store entry for ${key}`);
+    }
+  }
+  for (const [key, val] of chunkUploadStore) {
+    if (now - val.lastAccess > CHUNK_UPLOAD_TTL) {
+      chunkUploadStore.delete(key);
+      log(`Auto-cleanup: expired chunk upload session ${key}`);
     }
   }
 }, 10 * 60 * 1000);
@@ -159,6 +195,7 @@ function normalizePathname(pathname) {
 function isBridgeEndpointPath(pathname) {
   return pathname === "/health" ||
     pathname === "/upload" ||
+    pathname === "/proxy" ||
     pathname === "/editor" ||
     pathname === "/callback" ||
     pathname === "/saved" ||
@@ -189,7 +226,7 @@ function splitBridgeRoute(pathname) {
   }
 
   // 3) Auto-detect prefixed deployment paths (e.g. /bridge/upload)
-  const exactEndpoints = ["/health", "/upload", "/editor", "/callback", "/saved", "/cleanup"];
+  const exactEndpoints = ["/health", "/upload", "/proxy", "/editor", "/callback", "/saved", "/cleanup"];
   for (const endpoint of exactEndpoints) {
     if (!p.endsWith(endpoint)) continue;
     const prefix = normalizeBasePath(p.slice(0, p.length - endpoint.length));
@@ -230,6 +267,49 @@ function resolveBridgeUrl(req, basePath = "") {
   return resolveBrowserBridgeUrl(req, basePath);
 }
 
+function resolveTenant(params, req) {
+  const fromQuery = params.get("tenant") || "";
+  const fromHeader = (req?.headers?.["x-bridge-tenant"] || "").trim();
+  const tenant = normalizeTenantId(fromQuery || fromHeader, "");
+  if (tenant) return { tenant };
+  if (CONFIG.requireTenant) return { error: "Missing tenant parameter" };
+  return { tenant: CONFIG.defaultTenant };
+}
+
+function fileStoreKey(tenant, asset) {
+  return `${tenant}::${asset}`;
+}
+
+function chunkSessionKey(tenant, asset, uploadId) {
+  return `${tenant}::${asset}::${uploadId}`;
+}
+
+function cleanupChunkSessionsForAsset(tenant, asset) {
+  const keyPrefix = `${tenant}::${asset}::`;
+  let removed = 0;
+  for (const key of chunkUploadStore.keys()) {
+    if (!key.startsWith(keyPrefix)) continue;
+    chunkUploadStore.delete(key);
+    removed += 1;
+  }
+  return removed;
+}
+
+function storeAssetBuffer(tenant, asset, buffer, contentType = "application/octet-stream", dirty = false) {
+  const now = Date.now();
+  const key = fileStoreKey(tenant, asset);
+  fileStore.set(key, {
+    tenant,
+    asset,
+    buffer,
+    contentType,
+    dirty: !!dirty,
+    version: now,
+    lastAccess: now,
+  });
+  cleanupChunkSessionsForAsset(tenant, asset);
+}
+
 // ---------------------------------------------------------------------------
 // Security
 // ---------------------------------------------------------------------------
@@ -253,12 +333,12 @@ function getDocumentType(ext) {
   return "word";
 }
 
-function generateDocKey(asset, mode) {
+function generateDocKey(asset, mode, versionSeed = "", tenant = "default") {
   if (mode === "edit") {
     return `e-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   }
-  const day = new Date().toISOString().slice(0, 10);
-  return crypto.createHash("md5").update(`${asset}-${day}`).digest("hex").slice(0, 20);
+  const normalizedSeed = String(versionSeed || Date.now());
+  return crypto.createHash("md5").update(`${tenant}-${asset}-${normalizedSeed}`).digest("hex").slice(0, 20);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +348,7 @@ function corsHeaders(req) {
   return {
     "Access-Control-Allow-Origin": req.headers.origin || "*",
     "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Bridge-Secret",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Bridge-Secret, X-Bridge-Tenant",
     "Access-Control-Allow-Credentials": "true",
   };
 }
@@ -288,12 +368,21 @@ function readBody(req, maxSize = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let overflowed = false;
     req.on("data", (c) => {
+      if (overflowed) return;
       size += c.length;
-      if (size > maxSize) { req.destroy(new Error("Body too large")); return; }
+      if (size > maxSize) {
+        overflowed = true;
+        req.resume(); // drain remaining data so response can be sent
+        const err = new Error("Body too large");
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
       chunks.push(c);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("end", () => { if (!overflowed) resolve(Buffer.concat(chunks)); });
     req.on("error", reject);
   });
 }
@@ -332,10 +421,27 @@ function httpRequest(options, body) {
 // GET /health
 // ---------------------------------------------------------------------------
 async function handleHealth(req, res, params) {
+  const tenantSet = new Set();
+  for (const entry of fileStore.values()) {
+    if (entry?.tenant) tenantSet.add(entry.tenant);
+  }
+  for (const session of chunkUploadStore.values()) {
+    if (session?.tenant) tenantSet.add(session.tenant);
+  }
+
   const result = {
     status: "ok",
     ts: Date.now(),
+    features: {
+      chunkUpload: true,
+    },
     fileStoreEntries: fileStore.size,
+    chunkUploadEntries: chunkUploadStore.size,
+    tenantCount: tenantSet.size,
+    defaultTenant: CONFIG.defaultTenant,
+    requireTenant: CONFIG.requireTenant,
+    maxFileMB: CONFIG.maxFileMB,
+    maxChunkMB: CONFIG.maxChunkMB,
   };
 
   if (params.get("detail") === "true") {
@@ -374,22 +480,127 @@ async function handleHealth(req, res, params) {
 // POST /upload?asset=<path>
 // Plugin uploads the document file to Bridge before opening the editor.
 // ---------------------------------------------------------------------------
+async function handleChunkUpload(req, res, params, asset, tenant) {
+  const uploadId = String(params.get("uploadId") || "").trim();
+  const chunkIndex = parseInt(params.get("chunkIndex") || "-1", 10);
+  const totalChunks = parseInt(params.get("totalChunks") || "0", 10);
+  const contentType = String(params.get("contentType") || "").trim() || "application/octet-stream";
+
+  if (!uploadId ||
+      !Number.isInteger(chunkIndex) ||
+      !Number.isInteger(totalChunks) ||
+      chunkIndex < 0 ||
+      totalChunks <= 0 ||
+      totalChunks > 50000 ||
+      chunkIndex >= totalChunks) {
+    return sendJson(res, req, 400, { error: "Invalid chunk upload parameters" });
+  }
+
+  let buffer;
+  try {
+    const maxChunkBytes = CONFIG.maxChunkMB * 1024 * 1024;
+    buffer = await readBody(req, maxChunkBytes);
+  } catch (err) {
+    if (err.statusCode === 413) {
+      return sendJson(res, req, 413, { error: `Chunk too large (max ${CONFIG.maxChunkMB} MB)` });
+    }
+    throw err;
+  }
+
+  const key = chunkSessionKey(tenant, asset, uploadId);
+  const now = Date.now();
+  let session = chunkUploadStore.get(key);
+
+  if (!session) {
+    session = {
+      tenant,
+      asset,
+      uploadId,
+      totalChunks,
+      chunks: new Array(totalChunks),
+      receivedCount: 0,
+      bytesReceived: 0,
+      contentType,
+      lastAccess: now,
+    };
+    chunkUploadStore.set(key, session);
+  } else {
+    if (session.totalChunks !== totalChunks) {
+      return sendJson(res, req, 409, { error: "Chunk total mismatch for this upload session" });
+    }
+    session.lastAccess = now;
+    if (contentType && session.contentType === "application/octet-stream") {
+      session.contentType = contentType;
+    }
+  }
+
+  if (!session.chunks[chunkIndex]) {
+    session.chunks[chunkIndex] = buffer;
+    session.receivedCount += 1;
+    session.bytesReceived += buffer.length;
+  }
+
+  const maxFileBytes = CONFIG.maxFileMB * 1024 * 1024;
+  if (session.bytesReceived > maxFileBytes) {
+    chunkUploadStore.delete(key);
+    return sendJson(res, req, 413, { error: `File too large (max ${CONFIG.maxFileMB} MB)` });
+  }
+
+  if (session.receivedCount < session.totalChunks) {
+    return sendJson(res, req, 200, {
+      ok: true,
+      chunked: true,
+      partial: true,
+      chunkIndex,
+      received: session.receivedCount,
+      totalChunks: session.totalChunks,
+    });
+  }
+
+  for (let i = 0; i < session.totalChunks; i++) {
+    if (!session.chunks[i]) {
+      return sendJson(res, req, 409, { error: `Missing chunk ${i}` });
+    }
+  }
+
+  const merged = Buffer.concat(session.chunks);
+  chunkUploadStore.delete(key);
+  storeAssetBuffer(tenant, asset, merged, session.contentType || "application/octet-stream", false);
+  log(`Upload(chunked): tenant=${tenant}, stored "${asset}" (${merged.length} bytes, ${session.totalChunks} chunks)`);
+  return sendJson(res, req, 200, { ok: true, chunked: true, size: merged.length });
+}
+
 async function handleUpload(req, res, params) {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
+
   const asset = params.get("asset") || "";
   if (!isValidAssetPath(asset)) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
 
+  const isChunkedMode = params.get("chunked") === "1" || params.has("uploadId") || params.has("chunkIndex");
+  if (isChunkedMode) {
+    return await handleChunkUpload(req, res, params, asset, tenant);
+  }
+
   try {
-    const buffer = await readBody(req, 200 * 1024 * 1024); // 200 MB max
+    const maxFileBytes = CONFIG.maxFileMB * 1024 * 1024;
+    const buffer = await readBody(req, maxFileBytes);
     const contentType = req.headers["content-type"] || "application/octet-stream";
-    fileStore.set(asset, { buffer, contentType, dirty: false, lastAccess: Date.now() });
-    log(`Upload: stored "${asset}" (${buffer.length} bytes)`);
+    storeAssetBuffer(tenant, asset, buffer, contentType, false);
+    log(`Upload: tenant=${tenant}, stored "${asset}" (${buffer.length} bytes)`);
     sendJson(res, req, 200, { ok: true, size: buffer.length });
   } catch (err) {
+    if (err.statusCode === 413) {
+      return sendJson(res, req, 413, { error: `File too large (max ${CONFIG.maxFileMB} MB)` });
+    }
     log(`Upload error: ${err.message}`);
     sendJson(res, req, 500, { error: err.message });
   }
@@ -404,14 +615,19 @@ async function handleProxy(req, res, assetPath, params) {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
   if (!isValidAssetPath(assetPath)) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
 
   // Serve from in-memory store (push model — browser uploaded this file)
-  const entry = fileStore.get(assetPath);
+  const entry = fileStore.get(fileStoreKey(tenant, assetPath));
   if (entry) {
-    log(`Proxy: serving "${assetPath}" from file store (${entry.buffer.length} bytes)`);
+    log(`Proxy: tenant=${tenant}, serving "${assetPath}" from file store (${entry.buffer.length} bytes)`);
     entry.lastAccess = Date.now();
     res.writeHead(200, {
       "Content-Type": entry.contentType || "application/octet-stream",
@@ -520,6 +736,11 @@ function handleEditor(req, res, params, routeBasePath = "") {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendHtml(res, req, 400, "<h1>Missing tenant parameter</h1>");
+  }
+  const tenant = tenantResult.tenant;
 
   const asset = params.get("asset") || "";
   if (!isValidAssetPath(asset)) {
@@ -534,6 +755,8 @@ function handleEditor(req, res, params, routeBasePath = "") {
   const ext = asset.split(".").pop().toLowerCase();
   const fname = asset.split("/").pop();
   const documentType = getDocumentType(ext);
+  const storeEntry = fileStore.get(fileStoreKey(tenant, asset));
+  const versionSeed = storeEntry?.version || storeEntry?.lastAccess || params.get("v") || Date.now();
 
   if (ext === "pdf" && mode === "edit") mode = "view";
 
@@ -541,13 +764,14 @@ function handleEditor(req, res, params, routeBasePath = "") {
   // onlyofficeBase: where ONLYOFFICE server can reach bridge (proxy/callback URLs)
   const bridgeBrowserBase = resolveBrowserBridgeUrl(req, routeBasePath);
   const bridgeOnlyofficeBase = resolveBridgeUrl(req, routeBasePath);
+  const tenantParam = `&tenant=${encodeURIComponent(tenant)}`;
   const secretParam = CONFIG.bridgeSecret ? `&secret=${encodeURIComponent(CONFIG.bridgeSecret)}` : "";
 
-  const documentUrl = `${bridgeOnlyofficeBase}/proxy/${encodeURIComponent(asset)}?t=${Date.now()}${secretParam}`;
+  const documentUrl = `${bridgeOnlyofficeBase}/proxy?asset=${encodeURIComponent(asset)}${tenantParam}&t=${Date.now()}${secretParam}`;
   const callbackUrl = mode === "edit"
-    ? `${bridgeOnlyofficeBase}/callback?asset=${encodeURIComponent(asset)}${secretParam}`
+    ? `${bridgeOnlyofficeBase}/callback?asset=${encodeURIComponent(asset)}${tenantParam}${secretParam}`
     : undefined;
-  const key = generateDocKey(asset, mode);
+  const key = generateDocKey(asset, mode, versionSeed, tenant);
 
   const isEdit = mode === "edit";
   const config = {
@@ -571,7 +795,8 @@ function handleEditor(req, res, params, routeBasePath = "") {
       lang,
       user: { id: userId, name: userName },
       customization: {
-        autosave: isEdit,
+        // Manual save mode: edits are saved when user clicks save.
+        autosave: false,
         forcesave: isEdit,
         chat: false,
         compactHeader: true,
@@ -623,6 +848,7 @@ function handleEditor(req, res, params, routeBasePath = "") {
       var statusEl = document.getElementById("status");
       var assetPath = ${assetJson};
       var hasChanges = false;
+      var docEditor = null;
       var config = ${JSON.stringify(config)};
 
       config.events = {
@@ -634,19 +860,49 @@ function handleEditor(req, res, params, routeBasePath = "") {
           // event.data === false → document is saved / no changes
           if (event && event.data === true) {
             hasChanges = true;
+            try {
+              window.parent.postMessage({ type: "oo-bridge-dirty", asset: assetPath }, "*");
+            } catch (e) {}
           } else if (event && event.data === false && hasChanges) {
             hasChanges = false;
+            try {
+              window.parent.postMessage({ type: "oo-bridge-clean", asset: assetPath }, "*");
+            } catch (e) {}
             // Notify the parent frame (SiYuan plugin) that a save occurred
             try {
               window.parent.postMessage({ type: "oo-bridge-saved", asset: assetPath }, "*");
             } catch (e) {}
           }
         },
+        onRequestClose: function() {
+          try {
+            window.parent.postMessage({ type: "oo-bridge-request-close-ok", asset: assetPath }, "*");
+          } catch (e) {}
+        },
         onError: function(e) {
           statusEl.textContent = "Error: " + (e && e.data ? JSON.stringify(e.data) : "Unknown");
           statusEl.className = "error";
         }
       };
+
+      window.addEventListener("beforeunload", function(e) {
+        if (!hasChanges) return;
+        e.preventDefault();
+        e.returnValue = "";
+      });
+
+      window.addEventListener("message", function(event) {
+        var msg = event && event.data;
+        if (!msg || msg.type !== "oo-bridge-request-close") return;
+        if (msg.asset && msg.asset !== assetPath) return;
+        try {
+          if (docEditor && typeof docEditor.requestClose === "function") {
+            docEditor.requestClose();
+          } else {
+            window.parent.postMessage({ type: "oo-bridge-request-close-ok", asset: assetPath }, "*");
+          }
+        } catch (e) {}
+      });
 
       function loadScript(src) {
         return new Promise(function(resolve, reject) {
@@ -679,7 +935,7 @@ function handleEditor(req, res, params, routeBasePath = "") {
       loadScriptCandidates(${JSON.stringify(apiJsCandidates)})
         .then(function() {
           statusEl.textContent = "Initializing editor...";
-          new DocsAPI.DocEditor("editor", config);
+          docEditor = new DocsAPI.DocEditor("editor", config);
         })
         .catch(function(err) {
           statusEl.textContent = "Failed to load ONLYOFFICE: " + err.message;
@@ -700,6 +956,11 @@ async function handleCallback(req, res, params) {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
 
   const assetPath = params.get("asset") || "";
 
@@ -713,12 +974,12 @@ async function handleCallback(req, res, params) {
   }
 
   const status = data.status;
-  log(`Callback: status=${status}, asset=${assetPath}`);
+  log(`Callback: tenant=${tenant}, status=${status}, asset=${assetPath}`);
 
   if ((status === 2 || status === 6) && data.url && assetPath) {
     try {
-      await downloadAndStore(data.url, assetPath);
-      log(`Callback: saved "${assetPath}"`);
+      await downloadAndStore(data.url, assetPath, tenant);
+      log(`Callback: tenant=${tenant}, saved "${assetPath}"`);
     } catch (err) {
       log(`Callback: save failed — ${err.message}`);
     }
@@ -737,22 +998,46 @@ async function handleCallback(req, res, params) {
 // Download saved file from ONLYOFFICE and store in memory.
 // Also attempts a direct push to SiYuan as a fallback (co-located setup).
 // ---------------------------------------------------------------------------
-async function downloadAndStore(downloadUrl, assetPath) {
-  log(`Downloading saved file from ONLYOFFICE: ${downloadUrl}`);
-  const dlRes = await httpGet(downloadUrl, {});
+async function downloadAndStore(downloadUrl, assetPath, tenant) {
+  log(`Downloading saved file from ONLYOFFICE: tenant=${tenant}, url=${downloadUrl}`);
+  const DOWNLOAD_TIMEOUT = 60000; // 60 seconds
+
+  const dlRes = await new Promise((resolve, reject) => {
+    const parsed = new URL(downloadUrl);
+    const mod = parsed.protocol === "https:" ? https : http;
+    const req = mod.get(downloadUrl, {}, (res) => resolve(res));
+    req.on("error", reject);
+    req.setTimeout(DOWNLOAD_TIMEOUT, () => {
+      req.destroy(new Error("Download timed out"));
+    });
+  });
+
   const chunks = [];
-  for await (const chunk of dlRes) chunks.push(chunk);
+  let bodySize = 0;
+  const MAX_SIZE = CONFIG.maxFileMB * 1024 * 1024;
+  await new Promise((resolve, reject) => {
+    const bodyTimer = setTimeout(() => {
+      dlRes.destroy(new Error("Response body read timed out"));
+    }, DOWNLOAD_TIMEOUT);
+    dlRes.on("data", (chunk) => {
+      bodySize += chunk.length;
+      if (bodySize > MAX_SIZE) {
+        clearTimeout(bodyTimer);
+        dlRes.destroy(new Error("Downloaded file exceeds size limit"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    dlRes.on("end", () => { clearTimeout(bodyTimer); resolve(); });
+    dlRes.on("error", (err) => { clearTimeout(bodyTimer); reject(err); });
+  });
+
   const fileBuffer = Buffer.concat(chunks);
   log(`Downloaded ${fileBuffer.length} bytes`);
 
   // Always store in file store so the plugin can pull it back to SiYuan
-  fileStore.set(assetPath, {
-    buffer: fileBuffer,
-    contentType: "application/octet-stream",
-    dirty: true,        // signal: plugin has not yet synced this back to SiYuan
-    lastAccess: Date.now(),
-  });
-  log(`Stored saved file in memory: ${assetPath}`);
+  storeAssetBuffer(tenant, assetPath, fileBuffer, "application/octet-stream", true);
+  log(`Stored saved file in memory: tenant=${tenant}, asset=${assetPath}`);
 
   // Optional: try to push directly to SiYuan (works only if Bridge can reach SiYuan)
   if (CONFIG.siyuanUrl) {
@@ -811,12 +1096,18 @@ async function handleSaved(req, res, params) {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
+
   const asset = params.get("asset") || "";
   if (!isValidAssetPath(asset)) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
 
-  const entry = fileStore.get(asset);
+  const entry = fileStore.get(fileStoreKey(tenant, asset));
   if (!entry || !entry.dirty) {
     // No pending saved version
     res.writeHead(204, {
@@ -828,10 +1119,9 @@ async function handleSaved(req, res, params) {
     return res.end();
   }
 
-  // Return the saved file and clear the dirty flag
-  entry.dirty = false;
+  // Return the saved file; clear dirty flag only after response is flushed
   entry.lastAccess = Date.now();
-  log(`Saved: serving saved version of "${asset}" to plugin`);
+  log(`Saved: tenant=${tenant}, serving saved version of "${asset}" to plugin`);
 
   res.writeHead(200, {
     "Content-Type": entry.contentType || "application/octet-stream",
@@ -841,7 +1131,9 @@ async function handleSaved(req, res, params) {
     Expires: "0",
     ...corsHeaders(req),
   });
-  res.end(entry.buffer);
+  res.end(entry.buffer, () => {
+    entry.dirty = false;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -852,9 +1144,19 @@ async function handleCleanup(req, res, params) {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
+
   const asset = params.get("asset") || "";
-  const deleted = fileStore.delete(asset);
-  log(`Cleanup: "${asset}" ${deleted ? "removed from store" : "was not in store"}`);
+  if (!isValidAssetPath(asset)) {
+    return sendJson(res, req, 400, { error: "Invalid asset path" });
+  }
+  const deleted = fileStore.delete(fileStoreKey(tenant, asset));
+  const chunkRemoved = cleanupChunkSessionsForAsset(tenant, asset);
+  log(`Cleanup: tenant=${tenant}, "${asset}" ${deleted ? "removed from store" : "was not in store"}, chunk sessions removed=${chunkRemoved}`);
   sendJson(res, req, 200, { ok: true });
 }
 
@@ -880,6 +1182,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (isReadMethod && pathname === "/editor") {
       return handleEditor(req, res, params, basePath);
+    }
+    if (isReadMethod && pathname === "/proxy") {
+      const assetPath = params.get("asset") || "";
+      return await handleProxy(req, res, assetPath, params);
     }
     if (isReadMethod && pathname.startsWith("/proxy/")) {
       const assetPath = decodeURIComponent(pathname.slice("/proxy/".length));
@@ -915,7 +1221,10 @@ server.listen(CONFIG.port, "0.0.0.0", () => {
   log(`  SiYuan      : ${CONFIG.siyuanUrl || "(not configured — remote setup)"}`);
   log(`  Auth token  : ${CONFIG.siyuanToken ? "configured" : "not set"}`);
   log(`  Secret      : ${CONFIG.bridgeSecret ? "configured" : "not set"}`);
+  log(`  Tenant mode : ${CONFIG.requireTenant ? "required" : "optional"} (default=${CONFIG.defaultTenant})`);
   log(`  Base path   : ${CONFIG.bridgeBasePath || "/"}`);
+  log(`  Max file MB : ${CONFIG.maxFileMB}`);
+  log(`  Max chunk MB: ${CONFIG.maxChunkMB}`);
   log(`  External URL: ${CONFIG.bridgeUrl || "(auto-detect from Host header)"}`);
   if (bridgeUrlRawFromEnv && !CONFIG.bridgeUrl) {
     log(`  NOTE: Ignored placeholder BRIDGE_URL="${bridgeUrlRawFromEnv}", using request host instead.`);
