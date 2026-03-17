@@ -27,7 +27,7 @@ Full support for both previewing and editing. Documents can be opened in popups,
 
 ### 📌 Quick Start
 
-1️⃣ Deploy the ONLYOFFICE + Bridge service on a public server → Refer to the [Docker Deployment Guide](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER_zh_CN.md).
+1️⃣ Deploy the ONLYOFFICE + Bridge service on a public server → Refer to the [Docker Deployment Guide](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md).
 
 2️⃣ Install this plugin from the SiYuan Marketplace.
 

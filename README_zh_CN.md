@@ -27,7 +27,7 @@
 
 ### 📌 快速开始
 
-1️⃣ 在公网服务器上部署 ONLYOFFICE + Bridge 服务 → 参考 [Docker 部署指南](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER_zh_CN.md)
+1️⃣ 在公网服务器上部署 ONLYOFFICE + Bridge 服务 → 参考 [Docker 部署指南](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/README_DOCKER.md)
 
 2️⃣ 在思源集市安装本插件
 

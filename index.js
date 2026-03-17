@@ -399,6 +399,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
     // no-op: plain iframe mode
   }
 
+  openSetting() {
+    this._syncInputs();
+    super.openSetting();
+    const actionEl = this.setting?.dialog?.element?.querySelector(".b3-dialog__action");
+    if (actionEl) actionEl.remove();
+  }
+
   onunload() {
     this._isUnloading = true;
     this.eventBus.off("open-menu-link", this._onLinkMenu);
@@ -2016,14 +2023,17 @@ class OnlyOfficeBridgePlugin extends Plugin {
 
     this.setting = new Setting({
       width: "760px",
-      confirmCallback: () => this._onSave(),
+      destroyCallback: () => {
+        this._onSave({ silentNoChange: true }).catch((err) => {
+          console.warn("[Office Editor] Failed to save settings on close:", err);
+        });
+      },
     });
 
     this.setting.addItem({ title: this.t("settings.bridgeUrl"),     description: this.t("settings.bridgeUrlDesc"),     createActionElement: () => els.bridgeUrl });
     this.setting.addItem({ title: this.t("settings.onlyofficeUrl"), description: this.t("settings.onlyofficeUrlDesc"), createActionElement: () => els.onlyofficeUrl });
     this.setting.addItem({ title: this.t("settings.bridgeSecret"),  description: this.t("settings.bridgeSecretDesc"),  createActionElement: () => els.bridgeSecret });
 
-    for (const el of Object.values(els)) el.addEventListener("change", () => this._onSave());
     this._syncInputs();
   }
 
@@ -2035,10 +2045,11 @@ class OnlyOfficeBridgePlugin extends Plugin {
     e.bridgeSecret.value  = this.settings.bridgeSecret;
   }
 
-  async _onSave() {
+  async _onSave(opts = {}) {
+    const silentNoChange = !!opts.silentNoChange;
     const e = this._settingEls;
     if (!e.bridgeUrl) return;
-    this.settings = {
+    const nextSettings = {
       bridgeUrl:     normUrl(e.bridgeUrl.value, ""),
       onlyofficeUrl: normUrl(e.onlyofficeUrl.value, ""),
       bridgeSecret:  e.bridgeSecret.value.trim(),
@@ -2046,9 +2057,20 @@ class OnlyOfficeBridgePlugin extends Plugin {
       defaultMode:   DEFAULT_SETTINGS.defaultMode,
       enableEdit:    DEFAULT_SETTINGS.enableEdit,
     };
+    const changed =
+      nextSettings.bridgeUrl !== this.settings.bridgeUrl ||
+      nextSettings.onlyofficeUrl !== this.settings.onlyofficeUrl ||
+      nextSettings.bridgeSecret !== this.settings.bridgeSecret ||
+      nextSettings.defaultMode !== this.settings.defaultMode ||
+      nextSettings.enableEdit !== this.settings.enableEdit;
+    this.settings = nextSettings;
+    if (!changed) {
+      this._syncInputs();
+      return;
+    }
     await this._saveSettings();
     this._syncInputs();
-    showMessage(this.t("message.settingsSaved"), 2500, "info");
+    if (!silentNoChange) showMessage(this.t("message.settingsSaved"), 2500, "info");
   }
 }
 
