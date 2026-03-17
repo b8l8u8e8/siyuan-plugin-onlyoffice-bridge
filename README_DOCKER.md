@@ -10,7 +10,7 @@
 
 - 一台可运行 Docker 的服务器或电脑
 - 已安装 **Docker** 和 **Docker Compose**
-- 若需跨设备访问，确保客户端可访问端口 `7070`（ONLYOFFICE）和 `6789`（Bridge）
+- 若需跨设备访问，确保客户端可访问端口 `27670`（ONLYOFFICE）和 `27689`（Bridge）
 
 > 如果端口已被其他服务占用，可以在 `docker-compose.yml` 中修改端口映射后再启动。
 
@@ -53,7 +53,7 @@ services:
   onlyoffice:
     image: onlyoffice/documentserver:latest
     ports:
-      - "7070:80"                    # 宿主机端口:容器端口
+      - "27670:80"                    # 宿主机端口:容器端口
     volumes:
       - ./server/onlyoffice-bootstrap.sh:/app/onlyoffice-bootstrap.sh:ro
     entrypoint:
@@ -69,12 +69,12 @@ services:
   bridge:
     build: ./server
     ports:
-      - "6789:6789"                  # 宿主机端口:容器端口
+      - "27689:27689"                  # 宿主机端口:容器端口
     environment:
-      - BRIDGE_PORT=6789
+      - BRIDGE_PORT=27689
       - ONLYOFFICE_INTERNAL_URL=http://onlyoffice:80
-      - ONLYOFFICE_PUBLIC_URL=http://127.0.0.1:7070   
-      - BRIDGE_URL=http://bridge:6789
+      - ONLYOFFICE_PUBLIC_URL=http://127.0.0.1:27670   
+      - BRIDGE_URL=http://bridge:27689
       - BRIDGE_SECRET=               # 可选：填写密钥后插件设置也需对应填写，不一样会拒绝
     depends_on:
       - onlyoffice
@@ -93,14 +93,14 @@ docker compose up -d
 
 ### 4. 验证服务是否正常
 
-如果需要公网访问，请自行配置反向代理，将本机 `127.0.0.1` 的 `6789` 与 `7070` 端口映射到公网。
+如果需要公网访问，请自行配置反向代理，将本机 `127.0.0.1` 的 `27689` 与 `27670` 端口映射到公网。
 
 ```bash
 # 检查 Bridge 是否正常运行
-curl http://127.0.0.1:6789/health
+curl http://127.0.0.1:27689/health
 
 # 查看详细连接状态（包括 ONLYOFFICE 连接是否正常）
-curl http://127.0.0.1:6789/health?detail=true
+curl http://127.0.0.1:27689/health?detail=true
 ```
 
 如果返回类似 `{"status":"ok"}` 的内容，说明服务已正常运行。
@@ -111,8 +111,8 @@ curl http://127.0.0.1:6789/health?detail=true
 
 | 插件设置项 | 填什么 | 说明 |
 |------------|--------|------|
-| **Bridge 地址** | `http://127.0.0.1:6789` | 必填。仅当前设备可用；跨设备请改为浏览器可访问的内网地址，公网请走反向代理 |
-| **ONLYOFFICE 地址** | `http://127.0.0.1:7070` | 可选。仅当前设备可用；跨设备请改为浏览器可访问的内网地址，公网请走反向代理。留空也行（Bridge 会自动提供） |
+| **Bridge 地址** | `http://127.0.0.1:27689` | 必填。仅当前设备可用；跨设备请改为浏览器可访问的内网地址，公网请走反向代理 |
+| **ONLYOFFICE 地址** | `http://127.0.0.1:27670` | 可选。仅当前设备可用；跨设备请改为浏览器可访问的内网地址，公网请走反向代理。留空也行（Bridge 会自动提供） |
 | **Bridge 密钥** | 与 `BRIDGE_SECRET` 一致 | 可选，留空则不启用 |
 
 配置完成后，在文档中右键点击 Office 附件即可预览或编辑。
@@ -174,7 +174,7 @@ docker compose build bridge && docker compose up -d bridge
 ### 上传失败：`Bridge returned HTTP 404`
 
 **可能原因**：
-1. Bridge 地址填错了——填成了 ONLYOFFICE 的地址（`:7070`），应该填 Bridge 的地址（`:6789`）
+1. Bridge 地址填错了——填成了 ONLYOFFICE 的地址（`:27670`），应该填 Bridge 的地址（`:27689`）
 3. 浏览器无法访问 Bridge 服务
 
 **排查方法**：
@@ -195,7 +195,7 @@ Docker 部署下需要同时配置：
 
 1. 检查 Bridge 日志：`docker compose logs bridge`
 2. 确保 ONLYOFFICE 能访问 Bridge 的 callback 地址
-3. 确保 `BRIDGE_URL` 填写正确（Docker 部署中为 `http://bridge:6789`）
+3. 确保 `BRIDGE_URL` 填写正确（Docker 部署中为 `http://bridge:27689`）
 
 ### ONLYOFFICE 启动后一直连不上
 

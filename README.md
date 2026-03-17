@@ -47,8 +47,8 @@ Supports preview + editing, and documents can be opened in popup, embedded, or t
 
 | Setting                | Description                                                  |
 | ---------------------- | ------------------------------------------------------------ |
-| **Bridge Address**     | Required. Default `http://127.0.0.1:6789` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy |
-| **ONLYOFFICE Address** | Optional. Default `http://127.0.0.1:7070` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy. If empty, the Bridge server configuration will be used |
+| **Bridge Address**     | Required. Default `http://127.0.0.1:27689` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy |
+| **ONLYOFFICE Address** | Optional. Default `http://127.0.0.1:27670` (same device only). For multi-device access, use a browser-reachable LAN address; for internet access, use reverse proxy. If empty, the Bridge server configuration will be used |
 | **Bridge Secret**      | Optional. Must match the server `BRIDGE_SECRET`. Leave empty to disable |
 
 ---

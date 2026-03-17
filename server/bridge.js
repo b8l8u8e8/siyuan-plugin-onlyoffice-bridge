@@ -111,11 +111,11 @@ function normalizeTenantId(v, fallback = "") {
 const bridgeUrlRawFromEnv = trimRightSlash(process.env.BRIDGE_URL || "");
 const bridgeUrlFromEnv = normalizeBridgeUrlFromEnv(bridgeUrlRawFromEnv);
 const CONFIG = {
-  port:                  parseInt(process.env.BRIDGE_PORT || "6789", 10),
+  port:                  parseInt(process.env.BRIDGE_PORT || "27689", 10),
   siyuanUrl:             trimRightSlash(process.env.SIYUAN_URL || ""),
   siyuanToken:           process.env.SIYUAN_TOKEN || "",
   // Internal address for bridge-side checks/calls (container network, localhost, etc.)
-  onlyofficeInternalUrl: trimRightSlash(process.env.ONLYOFFICE_INTERNAL_URL || process.env.ONLYOFFICE_URL || "http://127.0.0.1:7070"),
+  onlyofficeInternalUrl: trimRightSlash(process.env.ONLYOFFICE_INTERNAL_URL || process.env.ONLYOFFICE_URL || "http://127.0.0.1:27670"),
   // Browser-accessible address for loading ONLYOFFICE api.js in editor page
   onlyofficePublicUrl:   trimRightSlash(process.env.ONLYOFFICE_PUBLIC_URL || process.env.ONLYOFFICE_BROWSER_URL || ""),
   bridgeUrl:             bridgeUrlFromEnv,

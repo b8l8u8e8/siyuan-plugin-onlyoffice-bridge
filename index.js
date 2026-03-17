@@ -2034,8 +2034,8 @@ class OnlyOfficeBridgePlugin extends Plugin {
     };
 
     const els = {
-      bridgeUrl:     mkInput("http://your-public-server:6789"),
-      onlyofficeUrl: mkInput("http://your-public-server:7070"),
+      bridgeUrl:     mkInput("http://your-public-server:27689"),
+      onlyofficeUrl: mkInput("http://your-public-server:27670"),
       bridgeSecret:  mkInput("", "password"),
     };
     this._settingEls = els;
