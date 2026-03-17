@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-onlyoffice-bridge",
   "author": "取舍",
   "url": "https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "minAppVersion": "2.9.0",
   "disabledInPublish": false,
   "backends": [
