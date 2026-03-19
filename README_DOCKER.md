@@ -47,6 +47,7 @@ cd siyuan-plugin-onlyoffice-bridge
 ### 2. 查看与修改docker-compose.yml配置
 
 默认配置为`127.0.0.1`，如需公网访问，请自行配置反向代理。
+如果已经部署过，修改了下方配置后请在项目目录执行 `docker compose up -d --force-recreate` 使新配置生效，若同时改了 Bridge 镜像或代码，请改用 `docker compose up -d --build --force-recreate`。
 
 ```yaml
 services:
@@ -70,12 +71,15 @@ services:
     build: ./server
     ports:
       - "27689:27689"                  # 宿主机端口:容器端口
+    volumes:
+      - ./server/cache:/app/cache      # Bridge 文件缓存目录（映射到宿主机）
     environment:
       - BRIDGE_PORT=27689
       - ONLYOFFICE_INTERNAL_URL=http://onlyoffice:80
       - ONLYOFFICE_PUBLIC_URL=http://127.0.0.1:27670   
       - BRIDGE_URL=http://bridge:27689
-      - BRIDGE_SECRET=               # 可选：填写密钥后插件设置也需对应填写，不一样会拒绝
+      - BRIDGE_SECRET=               # 可选：填写密钥后插件设置也需对应填写，密钥不一样会拒绝
+      - CACHE_TTL_HOURS=24           # Bridge 文件缓存保留时长（小时），默认 24
     depends_on:
       - onlyoffice
     restart: unless-stopped
@@ -88,8 +92,6 @@ docker compose up -d
 ```
 
 首次启动需要**构建 Bridge 镜像 + 拉取 ONLYOFFICE 镜像**，可能需要几分钟，请耐心等待。
-
-> ONLYOFFICE 服务启动较慢（约 1-2 分钟），启动后才能正常使用。
 
 ### 4. 验证服务是否正常
 
@@ -119,7 +121,7 @@ curl http://127.0.0.1:27689/health?detail=true
 
 ---
 
-## 🔄 更新应用
+## 🔄 更新Docker应用
 
 ```bash
 # 拉取最新源码
@@ -220,10 +222,11 @@ docker compose logs -f onlyoffice
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/health` | GET | 健康检查（加 `?detail=true` 获取连接详情） |
+| `/cache?asset=<path>` | GET | 查询指定文件是否在 Bridge 缓存中（含版本元信息） |
 | `/upload?asset=<path>` | POST | 插件上传文件到 Bridge |
 | `/proxy/<path>` | GET | ONLYOFFICE 从 Bridge 获取文件 |
 | `/oo/<path>` | GET | 代理 ONLYOFFICE 静态资源（api.js 等） |
 | `/editor` | GET | 编辑器 HTML 页面 |
 | `/callback` | POST | ONLYOFFICE 保存回调 |
 | `/saved?asset=<path>` | GET | 插件拉取已保存的文件 |
-| `/cleanup?asset=<path>` | POST | 清理 Bridge 内存中的文件缓存 |
+| `/cleanup?asset=<path>` | POST | 清理会话状态（保留磁盘缓存，按 TTL 自动过期） |

@@ -20,6 +20,8 @@ services:
     build: ./server
     ports:
       - "27689:27689"
+    volumes:
+      - ./server/cache:/app/cache
     environment:
       - BRIDGE_PORT=27689
       # Bridge -> ONLYOFFICE connectivity (inside Docker network)
@@ -32,6 +34,8 @@ services:
       # - BRIDGE_BASE_PATH=/bridge
       # Optional shared secret (must match plugin setting)
       - BRIDGE_SECRET=
+      # File cache TTL in hours (default 24h)
+      - CACHE_TTL_HOURS=24
       # Multi-tenant isolation controls
       # - BRIDGE_DEFAULT_TENANT=default
       # - BRIDGE_REQUIRE_TENANT=false

@@ -10,26 +10,31 @@
  *   - SiYuan: deployed on an INTERNAL network (no public IP)
  *   - Browser: can reach both
  *
- * "Push" model — the SiYuan plugin (running in the browser) reads the document
+ * "Push" model - the SiYuan plugin (running in the browser) reads the document
  * from SiYuan and uploads it to Bridge. Bridge serves it to ONLYOFFICE.
  * On save, ONLYOFFICE posts the callback to Bridge, which stores the saved file
- * in memory. The plugin then fetches the saved file from Bridge and writes it
+ * in disk cache. The plugin then fetches the saved file from Bridge and writes it
  * back to SiYuan.
  *
  * Endpoints:
  *   GET  /health                Health check (?detail=true for connectivity info)
- *   POST /upload?asset=<path>   Receive file uploaded by plugin, store in memory
+ *   GET  /cache?asset=<path>    Return cache metadata for an asset
+ *   POST /upload?asset=<path>   Receive file uploaded by plugin, store in disk cache
  *   GET  /proxy/<assetPath>     Serve stored file to ONLYOFFICE
  *   GET  /oo/<path>             Proxy ONLYOFFICE static assets (api.js, web-apps)
  *   GET  /editor                Serve ONLYOFFICE editor HTML page
  *   POST /callback              Receive ONLYOFFICE save callbacks
  *   GET  /saved?asset=<path>    Return saved file for plugin to sync back to SiYuan
- *   POST /cleanup?asset=<path>  Remove file from memory
+ *   POST /cleanup?asset=<path>  Clear dirty/session state (cache retained until TTL)
+ *                               Add purge=1 to remove cache entry immediately
  */
 
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const fsp = fs.promises;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -125,29 +130,26 @@ const CONFIG = {
   requireTenant:         parseBool(process.env.BRIDGE_REQUIRE_TENANT || "false", false),
   maxFileMB:             parsePositiveInt(process.env.MAX_FILE_MB || process.env.MAX_UPLOAD_MB, 512),
   maxChunkMB:            parsePositiveInt(process.env.MAX_CHUNK_MB, 8),
+  cacheTtlHours:         parsePositiveInt(process.env.CACHE_TTL_HOURS, 24),
 };
 
 // ---------------------------------------------------------------------------
-// In-memory file store
-// key: `${tenant}::${assetPath}` (e.g. "team-a::assets/example.docx")
-// value: { buffer, contentType, dirty, version, lastAccess }
-//   dirty=true means ONLYOFFICE saved a new version that the plugin has not yet
-//   pulled back to SiYuan.
+// Chunk upload sessions stay in memory.
+// File cache is persisted on disk.
 // ---------------------------------------------------------------------------
-const fileStore = new Map();
 const chunkUploadStore = new Map();
-const FILE_TTL = 2 * 60 * 60 * 1000; // 2 hours
+const FILE_TTL = CONFIG.cacheTtlHours * 60 * 60 * 1000;
 const CHUNK_UPLOAD_TTL = 30 * 60 * 1000; // 30 minutes
+const CACHE_ROOT_DIR = path.join(__dirname, "cache");
+const CACHE_FILES_DIR = path.join(CACHE_ROOT_DIR, "files");
+const CACHE_META_DIR = path.join(CACHE_ROOT_DIR, "meta");
 
-// Auto-cleanup stale file entries every 10 minutes
+// Auto-cleanup stale cache entries every 10 minutes
 setInterval(() => {
+  cleanupExpiredFileCacheEntries().catch((err) => {
+    log(`Auto-cleanup: file cache cleanup failed: ${err.message}`);
+  });
   const now = Date.now();
-  for (const [key, val] of fileStore) {
-    if (now - val.lastAccess > FILE_TTL) {
-      fileStore.delete(key);
-      log(`Auto-cleanup: expired file store entry for ${key}`);
-    }
-  }
   for (const [key, val] of chunkUploadStore) {
     if (now - val.lastAccess > CHUNK_UPLOAD_TTL) {
       chunkUploadStore.delete(key);
@@ -194,6 +196,7 @@ function normalizePathname(pathname) {
 
 function isBridgeEndpointPath(pathname) {
   return pathname === "/health" ||
+    pathname === "/cache" ||
     pathname === "/upload" ||
     pathname === "/proxy" ||
     pathname === "/editor" ||
@@ -226,7 +229,7 @@ function splitBridgeRoute(pathname) {
   }
 
   // 3) Auto-detect prefixed deployment paths (e.g. /bridge/upload)
-  const exactEndpoints = ["/health", "/upload", "/proxy", "/editor", "/callback", "/saved", "/cleanup"];
+  const exactEndpoints = ["/health", "/cache", "/upload", "/proxy", "/editor", "/callback", "/saved", "/cleanup"];
   for (const endpoint of exactEndpoints) {
     if (!p.endsWith(endpoint)) continue;
     const prefix = normalizeBasePath(p.slice(0, p.length - endpoint.length));
@@ -280,6 +283,144 @@ function fileStoreKey(tenant, asset) {
   return `${tenant}::${asset}`;
 }
 
+function cacheEntryId(tenant, asset) {
+  return crypto.createHash("sha1").update(fileStoreKey(tenant, asset)).digest("hex");
+}
+
+function cacheEntryPathsById(entryId) {
+  const bucket = entryId.slice(0, 2);
+  return {
+    filePath: path.join(CACHE_FILES_DIR, bucket, `${entryId}.bin`),
+    metaPath: path.join(CACHE_META_DIR, bucket, `${entryId}.json`),
+  };
+}
+
+function normalizeCacheMeta(meta) {
+  const rawSourceSize = Number(meta.sourceSize);
+  const sourceSize = Number.isFinite(rawSourceSize) && rawSourceSize > 0
+    ? Math.floor(rawSourceSize)
+    : 0;
+  return {
+    tenant: String(meta.tenant || ""),
+    asset: String(meta.asset || ""),
+    contentType: String(meta.contentType || "application/octet-stream"),
+    dirty: !!meta.dirty,
+    version: String(meta.version || ""),
+    lastAccess: Number(meta.lastAccess || Date.now()),
+    size: Number(meta.size || 0),
+    sourceEtag: String(meta.sourceEtag || ""),
+    sourceLastModified: String(meta.sourceLastModified || ""),
+    sourceSize,
+  };
+}
+
+function normalizeSourceMetaValue(v) {
+  const s = String(v || "").trim();
+  return s.slice(0, 512);
+}
+
+function parseSourceSize(v) {
+  const parsed = Number(v);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+}
+
+function extractSourceMetaFromParams(params) {
+  return {
+    sourceEtag: normalizeSourceMetaValue(params.get("sourceEtag") || ""),
+    sourceLastModified: normalizeSourceMetaValue(params.get("sourceLastModified") || ""),
+    sourceSize: parseSourceSize(params.get("sourceSize") || "0"),
+  };
+}
+
+function cacheEntryLabel(meta, entryId) {
+  if (meta?.tenant && meta?.asset) return fileStoreKey(meta.tenant, meta.asset);
+  return entryId;
+}
+
+async function ensureCacheDirectories() {
+  await Promise.all([
+    fsp.mkdir(CACHE_FILES_DIR, { recursive: true }),
+    fsp.mkdir(CACHE_META_DIR, { recursive: true }),
+  ]);
+}
+
+async function listFilesRecursively(rootDir) {
+  const files = [];
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let items;
+    try {
+      items = await fsp.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    for (const item of items) {
+      const fullPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        stack.push(fullPath);
+      } else if (item.isFile()) {
+        files.push(fullPath);
+      }
+    }
+  }
+  return files;
+}
+
+async function deleteFileIfExists(filePath) {
+  try {
+    await fsp.unlink(filePath);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+}
+
+async function writeFileAtomic(filePath, data, encoding = undefined) {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    if (encoding) {
+      await fsp.writeFile(tempPath, data, { encoding });
+    } else {
+      await fsp.writeFile(tempPath, data);
+    }
+    await fsp.rename(tempPath, filePath);
+  } finally {
+    await deleteFileIfExists(tempPath);
+  }
+}
+
+async function readJsonIfExists(filePath) {
+  try {
+    const raw = await fsp.readFile(filePath, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+async function writeCacheMetaById(entryId, meta) {
+  const normalized = normalizeCacheMeta(meta);
+  const { metaPath } = cacheEntryPathsById(entryId);
+  await writeFileAtomic(metaPath, JSON.stringify(normalized), "utf-8");
+  return normalized;
+}
+
+async function removeCacheEntryById(entryId) {
+  const { filePath, metaPath } = cacheEntryPathsById(entryId);
+  await Promise.all([
+    deleteFileIfExists(filePath),
+    deleteFileIfExists(metaPath),
+  ]);
+}
+
+function computeBufferVersion(buffer) {
+  return crypto.createHash("sha1").update(buffer).digest("hex");
+}
+
 function chunkSessionKey(tenant, asset, uploadId) {
   return `${tenant}::${asset}::${uploadId}`;
 }
@@ -295,19 +436,188 @@ function cleanupChunkSessionsForAsset(tenant, asset) {
   return removed;
 }
 
-function storeAssetBuffer(tenant, asset, buffer, contentType = "application/octet-stream", dirty = false) {
+async function storeAssetBuffer(
+  tenant,
+  asset,
+  buffer,
+  contentType = "application/octet-stream",
+  dirty = false,
+  sourceMeta = {}
+) {
   const now = Date.now();
-  const key = fileStoreKey(tenant, asset);
-  fileStore.set(key, {
+  const entryId = cacheEntryId(tenant, asset);
+  const { filePath } = cacheEntryPathsById(entryId);
+  const normalizedSourceMeta = {
+    sourceEtag: normalizeSourceMetaValue(sourceMeta.sourceEtag || ""),
+    sourceLastModified: normalizeSourceMetaValue(sourceMeta.sourceLastModified || ""),
+    sourceSize: parseSourceSize(sourceMeta.sourceSize || 0),
+  };
+  const meta = normalizeCacheMeta({
     tenant,
     asset,
-    buffer,
     contentType,
     dirty: !!dirty,
-    version: now,
+    version: computeBufferVersion(buffer),
     lastAccess: now,
+    size: buffer.length,
+    ...normalizedSourceMeta,
   });
+  await writeFileAtomic(filePath, buffer);
+  await writeCacheMetaById(entryId, meta);
   cleanupChunkSessionsForAsset(tenant, asset);
+  return meta;
+}
+
+async function getCacheEntryMeta(tenant, asset, options = {}) {
+  const touch = !!options.touch;
+  const requireDirty = !!options.requireDirty;
+  const entryId = cacheEntryId(tenant, asset);
+  const { filePath, metaPath } = cacheEntryPathsById(entryId);
+  const rawMeta = await readJsonIfExists(metaPath);
+  if (!rawMeta) return null;
+
+  const meta = normalizeCacheMeta(rawMeta);
+  if (meta.tenant !== tenant || meta.asset !== asset) {
+    await removeCacheEntryById(entryId);
+    return null;
+  }
+
+  const now = Date.now();
+  if (!Number.isFinite(meta.lastAccess) || now - meta.lastAccess > FILE_TTL) {
+    await removeCacheEntryById(entryId);
+    log(`Auto-cleanup: expired file cache entry for ${fileStoreKey(tenant, asset)}`);
+    return null;
+  }
+
+  let stat;
+  try {
+    stat = await fsp.stat(filePath);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      await removeCacheEntryById(entryId);
+      return null;
+    }
+    throw err;
+  }
+  if (!stat.isFile()) {
+    await removeCacheEntryById(entryId);
+    return null;
+  }
+
+  meta.size = stat.size;
+  if (requireDirty && !meta.dirty) return null;
+
+  if (touch) {
+    meta.lastAccess = now;
+    await writeCacheMetaById(entryId, meta);
+  }
+
+  return {
+    ...meta,
+    entryId,
+    filePath,
+    metaPath,
+  };
+}
+
+async function setCacheEntryDirty(tenant, asset, dirty, expectedVersion = "") {
+  const entry = await getCacheEntryMeta(tenant, asset, { touch: false });
+  if (!entry) return false;
+  if (expectedVersion && entry.version !== expectedVersion) return false;
+  entry.dirty = !!dirty;
+  entry.lastAccess = Date.now();
+  await writeCacheMetaById(entry.entryId, entry);
+  return true;
+}
+
+async function updateCacheEntryOnCleanup(tenant, asset, sourceMeta = {}) {
+  const entry = await getCacheEntryMeta(tenant, asset, { touch: false });
+  if (!entry) return { exists: false, updatedSource: false };
+
+  const etag = normalizeSourceMetaValue(sourceMeta.sourceEtag || "");
+  const lastModified = normalizeSourceMetaValue(sourceMeta.sourceLastModified || "");
+  const sourceSize = parseSourceSize(sourceMeta.sourceSize || 0);
+  let updatedSource = false;
+
+  if (etag) {
+    entry.sourceEtag = etag;
+    updatedSource = true;
+  }
+  if (lastModified) {
+    entry.sourceLastModified = lastModified;
+    updatedSource = true;
+  }
+  if (sourceSize > 0) {
+    entry.sourceSize = sourceSize;
+    updatedSource = true;
+  }
+
+  entry.dirty = false;
+  entry.lastAccess = Date.now();
+  await writeCacheMetaById(entry.entryId, entry);
+  return { exists: true, updatedSource };
+}
+
+async function collectCacheStats() {
+  const now = Date.now();
+  const tenantSet = new Set();
+  let entryCount = 0;
+  const metaFiles = await listFilesRecursively(CACHE_META_DIR);
+  for (const metaPath of metaFiles) {
+    if (!metaPath.endsWith(".json")) continue;
+    const entryId = path.basename(metaPath, ".json");
+    if (!entryId) continue;
+    const rawMeta = await readJsonIfExists(metaPath);
+    if (!rawMeta) continue;
+    const meta = normalizeCacheMeta(rawMeta);
+    if (!meta.tenant || !meta.asset) continue;
+    if (!Number.isFinite(meta.lastAccess) || now - meta.lastAccess > FILE_TTL) continue;
+    const { filePath } = cacheEntryPathsById(entryId);
+    let stat;
+    try {
+      stat = await fsp.stat(filePath);
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    if (!stat.isFile()) continue;
+    entryCount += 1;
+    tenantSet.add(meta.tenant);
+  }
+  return { entryCount, tenantSet };
+}
+
+async function cleanupExpiredFileCacheEntries() {
+  const now = Date.now();
+  const metaFiles = await listFilesRecursively(CACHE_META_DIR);
+  for (const metaPath of metaFiles) {
+    if (!metaPath.endsWith(".json")) continue;
+    const entryId = path.basename(metaPath, ".json");
+    if (!entryId) continue;
+    const rawMeta = await readJsonIfExists(metaPath);
+    if (!rawMeta) continue;
+    const meta = normalizeCacheMeta(rawMeta);
+    const { filePath } = cacheEntryPathsById(entryId);
+    let fileMissing = false;
+    try {
+      const stat = await fsp.stat(filePath);
+      if (!stat.isFile()) fileMissing = true;
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        fileMissing = true;
+      } else {
+        throw err;
+      }
+    }
+    const expired = !meta.tenant ||
+      !meta.asset ||
+      !Number.isFinite(meta.lastAccess) ||
+      now - meta.lastAccess > FILE_TTL ||
+      fileMissing;
+    if (!expired) continue;
+    await removeCacheEntryById(entryId);
+    log(`Auto-cleanup: expired file cache entry for ${cacheEntryLabel(meta, entryId)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,10 +731,8 @@ function httpRequest(options, body) {
 // GET /health
 // ---------------------------------------------------------------------------
 async function handleHealth(req, res, params) {
-  const tenantSet = new Set();
-  for (const entry of fileStore.values()) {
-    if (entry?.tenant) tenantSet.add(entry.tenant);
-  }
+  const cacheStats = await collectCacheStats();
+  const tenantSet = new Set(cacheStats.tenantSet);
   for (const session of chunkUploadStore.values()) {
     if (session?.tenant) tenantSet.add(session.tenant);
   }
@@ -435,13 +743,14 @@ async function handleHealth(req, res, params) {
     features: {
       chunkUpload: true,
     },
-    fileStoreEntries: fileStore.size,
+    fileStoreEntries: cacheStats.entryCount,
     chunkUploadEntries: chunkUploadStore.size,
     tenantCount: tenantSet.size,
     defaultTenant: CONFIG.defaultTenant,
     requireTenant: CONFIG.requireTenant,
     maxFileMB: CONFIG.maxFileMB,
     maxChunkMB: CONFIG.maxChunkMB,
+    cacheTtlHours: CONFIG.cacheTtlHours,
   };
 
   if (params.get("detail") === "true") {
@@ -457,7 +766,7 @@ async function handleHealth(req, res, params) {
     result.onlyofficeInternalUrl = CONFIG.onlyofficeInternalUrl;
     result.onlyofficePublicUrl = CONFIG.onlyofficePublicUrl || "(same as internal or editor query override)";
     result.bridgeBasePath = CONFIG.bridgeBasePath || "/";
-    // Check SiYuan connectivity (optional — may not be reachable in remote setup)
+    // Check SiYuan connectivity (optional - may not be reachable in remote setup)
     if (CONFIG.siyuanUrl) {
       try {
         const headers = {};
@@ -469,11 +778,47 @@ async function handleHealth(req, res, params) {
         result.siyuan = `unreachable: ${e.message}`;
       }
     } else {
-      result.siyuan = "not configured (remote setup — plugin handles SiYuan sync)";
+      result.siyuan = "not configured (remote setup - plugin handles SiYuan sync)";
     }
   }
 
   sendJson(res, req, 200, result);
+}
+
+// ---------------------------------------------------------------------------
+// GET /cache?asset=<path>
+// Returns cache metadata for plugin-side upload skip decisions.
+// ---------------------------------------------------------------------------
+async function handleCache(req, res, params) {
+  if (!checkSecret(params, req)) {
+    return sendJson(res, req, 403, { error: "Forbidden" });
+  }
+  const tenantResult = resolveTenant(params, req);
+  if (tenantResult.error) {
+    return sendJson(res, req, 400, { error: tenantResult.error });
+  }
+  const tenant = tenantResult.tenant;
+
+  const asset = params.get("asset") || "";
+  if (!isValidAssetPath(asset)) {
+    return sendJson(res, req, 400, { error: "Invalid asset path" });
+  }
+
+  const entry = await getCacheEntryMeta(tenant, asset, { touch: true });
+  if (!entry) {
+    return sendJson(res, req, 200, { cached: false });
+  }
+
+  return sendJson(res, req, 200, {
+    cached: true,
+    dirty: !!entry.dirty,
+    version: entry.version,
+    size: entry.size,
+    contentType: entry.contentType || "application/octet-stream",
+    sourceEtag: entry.sourceEtag || "",
+    sourceLastModified: entry.sourceLastModified || "",
+    sourceSize: Number(entry.sourceSize || 0),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +830,7 @@ async function handleChunkUpload(req, res, params, asset, tenant) {
   const chunkIndex = parseInt(params.get("chunkIndex") || "-1", 10);
   const totalChunks = parseInt(params.get("totalChunks") || "0", 10);
   const contentType = String(params.get("contentType") || "").trim() || "application/octet-stream";
+  const sourceMeta = extractSourceMetaFromParams(params);
 
   if (!uploadId ||
       !Number.isInteger(chunkIndex) ||
@@ -521,6 +867,7 @@ async function handleChunkUpload(req, res, params, asset, tenant) {
       receivedCount: 0,
       bytesReceived: 0,
       contentType,
+      sourceMeta,
       lastAccess: now,
     };
     chunkUploadStore.set(key, session);
@@ -531,6 +878,19 @@ async function handleChunkUpload(req, res, params, asset, tenant) {
     session.lastAccess = now;
     if (contentType && session.contentType === "application/octet-stream") {
       session.contentType = contentType;
+    }
+    if (!session.sourceMeta || typeof session.sourceMeta !== "object") {
+      session.sourceMeta = sourceMeta;
+    } else {
+      if (!session.sourceMeta.sourceEtag && sourceMeta.sourceEtag) {
+        session.sourceMeta.sourceEtag = sourceMeta.sourceEtag;
+      }
+      if (!session.sourceMeta.sourceLastModified && sourceMeta.sourceLastModified) {
+        session.sourceMeta.sourceLastModified = sourceMeta.sourceLastModified;
+      }
+      if (!session.sourceMeta.sourceSize && sourceMeta.sourceSize) {
+        session.sourceMeta.sourceSize = sourceMeta.sourceSize;
+      }
     }
   }
 
@@ -565,7 +925,14 @@ async function handleChunkUpload(req, res, params, asset, tenant) {
 
   const merged = Buffer.concat(session.chunks);
   chunkUploadStore.delete(key);
-  storeAssetBuffer(tenant, asset, merged, session.contentType || "application/octet-stream", false);
+  await storeAssetBuffer(
+    tenant,
+    asset,
+    merged,
+    session.contentType || "application/octet-stream",
+    false,
+    session.sourceMeta || sourceMeta
+  );
   log(`Upload(chunked): tenant=${tenant}, stored "${asset}" (${merged.length} bytes, ${session.totalChunks} chunks)`);
   return sendJson(res, req, 200, { ok: true, chunked: true, size: merged.length });
 }
@@ -586,6 +953,7 @@ async function handleUpload(req, res, params) {
   }
 
   const isChunkedMode = params.get("chunked") === "1" || params.has("uploadId") || params.has("chunkIndex");
+  const sourceMeta = extractSourceMetaFromParams(params);
   if (isChunkedMode) {
     return await handleChunkUpload(req, res, params, asset, tenant);
   }
@@ -594,7 +962,7 @@ async function handleUpload(req, res, params) {
     const maxFileBytes = CONFIG.maxFileMB * 1024 * 1024;
     const buffer = await readBody(req, maxFileBytes);
     const contentType = req.headers["content-type"] || "application/octet-stream";
-    storeAssetBuffer(tenant, asset, buffer, contentType, false);
+    await storeAssetBuffer(tenant, asset, buffer, contentType, false, sourceMeta);
     log(`Upload: tenant=${tenant}, stored "${asset}" (${buffer.length} bytes)`);
     sendJson(res, req, 200, { ok: true, size: buffer.length });
   } catch (err) {
@@ -608,7 +976,7 @@ async function handleUpload(req, res, params) {
 
 // ---------------------------------------------------------------------------
 // GET /proxy/<assetPath>
-// Serve file to ONLYOFFICE. Checks in-memory store first (push model),
+// Serve file to ONLYOFFICE. Checks disk cache first (push model),
 // then falls back to fetching from SiYuan (co-located setup).
 // ---------------------------------------------------------------------------
 async function handleProxy(req, res, assetPath, params) {
@@ -624,23 +992,32 @@ async function handleProxy(req, res, assetPath, params) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
 
-  // Serve from in-memory store (push model — browser uploaded this file)
-  const entry = fileStore.get(fileStoreKey(tenant, assetPath));
+  // Serve from disk cache (push model - browser uploaded this file)
+  const entry = await getCacheEntryMeta(tenant, assetPath, { touch: true });
   if (entry) {
-    log(`Proxy: tenant=${tenant}, serving "${assetPath}" from file store (${entry.buffer.length} bytes)`);
-    entry.lastAccess = Date.now();
+    log(`Proxy: tenant=${tenant}, serving "${assetPath}" from file cache (${entry.size} bytes)`);
     res.writeHead(200, {
       "Content-Type": entry.contentType || "application/octet-stream",
-      "Content-Length": entry.buffer.length,
+      "Content-Length": entry.size,
       "Cache-Control": "no-cache",
       ...corsHeaders(req),
     });
-    return res.end(entry.buffer);
+    if (req.method === "HEAD") return res.end();
+    const stream = fs.createReadStream(entry.filePath);
+    stream.on("error", (err) => {
+      log(`Proxy stream error: ${err.message}`);
+      if (!res.headersSent) {
+        sendJson(res, req, 500, { error: `Proxy stream failed: ${err.message}` });
+      } else {
+        res.destroy(err);
+      }
+    });
+    return stream.pipe(res);
   }
 
   // Fallback: proxy from SiYuan (for co-located setups where Bridge can reach SiYuan)
   if (!CONFIG.siyuanUrl) {
-    return sendJson(res, req, 404, { error: "File not found in store and SIYUAN_URL not configured" });
+    return sendJson(res, req, 404, { error: "File not found in cache and SIYUAN_URL not configured" });
   }
 
   const targetUrl = `${CONFIG.siyuanUrl}/${assetPath}`;
@@ -732,7 +1109,7 @@ async function handleOnlyOfficeProxy(req, res, ooPath, search) {
 // ---------------------------------------------------------------------------
 // GET /editor
 // ---------------------------------------------------------------------------
-function handleEditor(req, res, params, routeBasePath = "") {
+async function handleEditor(req, res, params, routeBasePath = "") {
   if (!checkSecret(params, req)) {
     return sendJson(res, req, 403, { error: "Forbidden" });
   }
@@ -755,8 +1132,8 @@ function handleEditor(req, res, params, routeBasePath = "") {
   const ext = asset.split(".").pop().toLowerCase();
   const fname = asset.split("/").pop();
   const documentType = getDocumentType(ext);
-  const storeEntry = fileStore.get(fileStoreKey(tenant, asset));
-  const versionSeed = storeEntry?.version || storeEntry?.lastAccess || params.get("v") || Date.now();
+  const storeEntry = await getCacheEntryMeta(tenant, asset, { touch: false });
+  const versionSeed = storeEntry?.version || params.get("v") || Date.now();
 
   if (ext === "pdf" && mode === "edit") mode = "view";
 
@@ -856,8 +1233,8 @@ function handleEditor(req, res, params, routeBasePath = "") {
           statusEl.className = "hidden";
         },
         onDocumentStateChange: function(event) {
-          // event.data === true  → document has unsaved changes
-          // event.data === false → document is saved / no changes
+          // event.data === true  -> document has unsaved changes
+          // event.data === false -> document is saved / no changes
           if (event && event.data === true) {
             hasChanges = true;
             try {
@@ -969,7 +1346,7 @@ async function handleCallback(req, res, params) {
     const bodyBuf = await readBody(req);
     data = JSON.parse(bodyBuf.toString("utf-8"));
   } catch (err) {
-    log(`Callback: parse error — ${err.message}`);
+    log(`Callback: parse error - ${err.message}`);
     return sendJson(res, req, 200, { error: 0 });
   }
 
@@ -981,22 +1358,21 @@ async function handleCallback(req, res, params) {
       await downloadAndStore(data.url, assetPath, tenant);
       log(`Callback: tenant=${tenant}, saved "${assetPath}"`);
     } catch (err) {
-      log(`Callback: save failed — ${err.message}`);
+      log(`Callback: save failed - ${err.message}`);
     }
   } else if (status === 1) {
-    log(`Callback: document being edited — ${assetPath}`);
+    log(`Callback: document being edited - ${assetPath}`);
   } else if (status === 4) {
-    log(`Callback: closed without changes — ${assetPath}`);
+    log(`Callback: closed without changes - ${assetPath}`);
   } else if (status === 3 || status === 7) {
-    log(`Callback: ONLYOFFICE reported save error — status=${status}`);
+    log(`Callback: ONLYOFFICE reported save error - status=${status}`);
   }
 
   sendJson(res, req, 200, { error: 0 });
 }
 
 // ---------------------------------------------------------------------------
-// Download saved file from ONLYOFFICE and store in memory.
-// Also attempts a direct push to SiYuan as a fallback (co-located setup).
+// Download saved file from ONLYOFFICE and store in disk cache.
 // ---------------------------------------------------------------------------
 async function downloadAndStore(downloadUrl, assetPath, tenant) {
   log(`Downloading saved file from ONLYOFFICE: tenant=${tenant}, url=${downloadUrl}`);
@@ -1034,57 +1410,27 @@ async function downloadAndStore(downloadUrl, assetPath, tenant) {
 
   const fileBuffer = Buffer.concat(chunks);
   log(`Downloaded ${fileBuffer.length} bytes`);
+  const downloadedVersion = computeBufferVersion(fileBuffer);
 
-  // Always store in file store so the plugin can pull it back to SiYuan
-  storeAssetBuffer(tenant, assetPath, fileBuffer, "application/octet-stream", true);
-  log(`Stored saved file in memory: tenant=${tenant}, asset=${assetPath}`);
-
-  // Optional: try to push directly to SiYuan (works only if Bridge can reach SiYuan)
-  if (CONFIG.siyuanUrl) {
-    try {
-      await pushToSiyuan(fileBuffer, assetPath);
-      log(`Also pushed directly to SiYuan: ${assetPath}`);
-    } catch (err) {
-      log(`Could not push to SiYuan directly (expected for remote setup): ${err.message}`);
-    }
+  const existingEntry = await getCacheEntryMeta(tenant, assetPath, { touch: false });
+  if (existingEntry && existingEntry.version === downloadedVersion) {
+    existingEntry.lastAccess = Date.now();
+    existingEntry.size = fileBuffer.length;
+    await writeCacheMetaById(existingEntry.entryId, existingEntry);
+    log(
+      `Callback: duplicate saved content ignored, tenant=${tenant}, asset=${assetPath}, version=${downloadedVersion.slice(0, 12)}, dirty=${existingEntry.dirty}`
+    );
+    return;
   }
-}
+  const sourceMeta = existingEntry ? {
+    sourceEtag: existingEntry.sourceEtag || "",
+    sourceLastModified: existingEntry.sourceLastModified || "",
+    sourceSize: Number(existingEntry.sourceSize || 0),
+  } : {};
 
-// ---------------------------------------------------------------------------
-// Push file to SiYuan via /api/file/putFile (for co-located setup only)
-// ---------------------------------------------------------------------------
-async function pushToSiyuan(fileBuffer, assetPath) {
-  const filePath = `/data/${assetPath}`;
-  const fname = assetPath.split("/").pop();
-  const boundary = "----BridgeBoundary" + crypto.randomBytes(8).toString("hex");
-
-  const parts = [];
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\n${filePath}\r\n`);
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="isDir"\r\n\r\nfalse\r\n`);
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="modTime"\r\n\r\n${Date.now()}\r\n`);
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fname}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
-
-  const head = Buffer.from(parts.join(""));
-  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
-  const body = Buffer.concat([head, fileBuffer, tail]);
-
-  const headers = {
-    "Content-Type": `multipart/form-data; boundary=${boundary}`,
-    "Content-Length": body.length,
-  };
-  if (CONFIG.siyuanToken) headers["Authorization"] = `Token ${CONFIG.siyuanToken}`;
-
-  const putUrl = `${CONFIG.siyuanUrl}/api/file/putFile`;
-  const result = await httpRequest({ url: putUrl, method: "POST", headers }, body);
-  let resp;
-  try {
-    resp = JSON.parse(result.body.toString("utf-8"));
-  } catch {
-    throw new Error(`SiYuan returned non-JSON: ${result.body.toString("utf-8").slice(0, 200)}`);
-  }
-  if (resp.code !== 0) {
-    throw new Error(`SiYuan putFile error: ${resp.msg || JSON.stringify(resp)}`);
-  }
+  // Always store in file cache so the plugin can pull it back to SiYuan
+  await storeAssetBuffer(tenant, assetPath, fileBuffer, "application/octet-stream", true, sourceMeta);
+  log(`Stored saved file in cache: tenant=${tenant}, asset=${assetPath}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,8 +1453,8 @@ async function handleSaved(req, res, params) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
 
-  const entry = fileStore.get(fileStoreKey(tenant, asset));
-  if (!entry || !entry.dirty) {
+  const entry = await getCacheEntryMeta(tenant, asset, { touch: true, requireDirty: true });
+  if (!entry) {
     // No pending saved version
     res.writeHead(204, {
       "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -1120,25 +1466,42 @@ async function handleSaved(req, res, params) {
   }
 
   // Return the saved file; clear dirty flag only after response is flushed
-  entry.lastAccess = Date.now();
   log(`Saved: tenant=${tenant}, serving saved version of "${asset}" to plugin`);
 
   res.writeHead(200, {
     "Content-Type": entry.contentType || "application/octet-stream",
-    "Content-Length": entry.buffer.length,
+    "Content-Length": entry.size,
     "Cache-Control": "no-store, no-cache, must-revalidate",
     Pragma: "no-cache",
     Expires: "0",
     ...corsHeaders(req),
   });
-  res.end(entry.buffer, () => {
-    entry.dirty = false;
+  if (req.method === "HEAD") {
+    return res.end();
+  }
+
+  res.once("finish", () => {
+    setCacheEntryDirty(tenant, asset, false, entry.version).catch((err) => {
+      log(`Saved: failed to clear dirty flag for "${asset}": ${err.message}`);
+    });
   });
+  const stream = fs.createReadStream(entry.filePath);
+  stream.on("error", (err) => {
+    log(`Saved stream error: ${err.message}`);
+    if (!res.headersSent) {
+      sendJson(res, req, 500, { error: `Saved stream failed: ${err.message}` });
+    } else {
+      res.destroy(err);
+    }
+  });
+  stream.pipe(res);
 }
 
 // ---------------------------------------------------------------------------
 // POST /cleanup?asset=<path>
-// Plugin calls this after syncing back to SiYuan, to free memory.
+// Plugin calls this after syncing back to SiYuan.
+// Keep cached file on disk and only clear dirty/session state by default.
+// If purge=1 is provided, remove cache entry immediately.
 // ---------------------------------------------------------------------------
 async function handleCleanup(req, res, params) {
   if (!checkSecret(params, req)) {
@@ -1154,9 +1517,22 @@ async function handleCleanup(req, res, params) {
   if (!isValidAssetPath(asset)) {
     return sendJson(res, req, 400, { error: "Invalid asset path" });
   }
-  const deleted = fileStore.delete(fileStoreKey(tenant, asset));
+
+  const purge = params.get("purge") === "1" || params.get("purge") === "true";
+  if (purge) {
+    await removeCacheEntryById(cacheEntryId(tenant, asset));
+    const chunkRemoved = cleanupChunkSessionsForAsset(tenant, asset);
+    log(`Cleanup: tenant=${tenant}, "${asset}" purged from cache, chunk sessions removed=${chunkRemoved}`);
+    return sendJson(res, req, 200, { ok: true, purged: true });
+  }
+
+  const sourceMeta = extractSourceMetaFromParams(params);
+  const cleanupResult = await updateCacheEntryOnCleanup(tenant, asset, sourceMeta);
   const chunkRemoved = cleanupChunkSessionsForAsset(tenant, asset);
-  log(`Cleanup: tenant=${tenant}, "${asset}" ${deleted ? "removed from store" : "was not in store"}, chunk sessions removed=${chunkRemoved}`);
+  const stateText = cleanupResult.exists
+    ? `cleared dirty flag${cleanupResult.updatedSource ? " and refreshed source meta" : ""}`
+    : "not in cache";
+  log(`Cleanup: tenant=${tenant}, "${asset}" ${stateText}, chunk sessions removed=${chunkRemoved}`);
   sendJson(res, req, 200, { ok: true });
 }
 
@@ -1177,11 +1553,14 @@ const server = http.createServer(async (req, res) => {
     if (isReadMethod && pathname === "/health") {
       return await handleHealth(req, res, params);
     }
+    if (isReadMethod && pathname === "/cache") {
+      return await handleCache(req, res, params);
+    }
     if (req.method === "POST" && pathname === "/upload") {
       return await handleUpload(req, res, params);
     }
     if (isReadMethod && pathname === "/editor") {
-      return handleEditor(req, res, params, basePath);
+      return await handleEditor(req, res, params, basePath);
     }
     if (isReadMethod && pathname === "/proxy") {
       const assetPath = params.get("asset") || "";
@@ -1211,23 +1590,33 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(CONFIG.port, "0.0.0.0", () => {
-  log("===========================================");
-  log("  ONLYOFFICE Bridge Server");
-  log("===========================================");
-  log(`  Bridge      : http://0.0.0.0:${CONFIG.port}`);
-  log(`  OnlyOffice (internal): ${CONFIG.onlyofficeInternalUrl}`);
-  log(`  OnlyOffice (public)  : ${CONFIG.onlyofficePublicUrl || "(same as internal / editor query override)"}`);
-  log(`  SiYuan      : ${CONFIG.siyuanUrl || "(not configured — remote setup)"}`);
-  log(`  Auth token  : ${CONFIG.siyuanToken ? "configured" : "not set"}`);
-  log(`  Secret      : ${CONFIG.bridgeSecret ? "configured" : "not set"}`);
-  log(`  Tenant mode : ${CONFIG.requireTenant ? "required" : "optional"} (default=${CONFIG.defaultTenant})`);
-  log(`  Base path   : ${CONFIG.bridgeBasePath || "/"}`);
-  log(`  Max file MB : ${CONFIG.maxFileMB}`);
-  log(`  Max chunk MB: ${CONFIG.maxChunkMB}`);
-  log(`  External URL: ${CONFIG.bridgeUrl || "(auto-detect from Host header)"}`);
-  if (bridgeUrlRawFromEnv && !CONFIG.bridgeUrl) {
-    log(`  NOTE: Ignored placeholder BRIDGE_URL="${bridgeUrlRawFromEnv}", using request host instead.`);
-  }
-  log("===========================================");
+async function startServer() {
+  await ensureCacheDirectories();
+  server.listen(CONFIG.port, "0.0.0.0", () => {
+    log("===========================================");
+    log("  ONLYOFFICE Bridge Server");
+    log("===========================================");
+    log(`  Bridge      : http://0.0.0.0:${CONFIG.port}`);
+    log(`  OnlyOffice (internal): ${CONFIG.onlyofficeInternalUrl}`);
+    log(`  OnlyOffice (public)  : ${CONFIG.onlyofficePublicUrl || "(same as internal / editor query override)"}`);
+    log(`  SiYuan      : ${CONFIG.siyuanUrl || "(not configured - remote setup)"}`);
+    log(`  Auth token  : ${CONFIG.siyuanToken ? "configured" : "not set"}`);
+    log(`  Secret      : ${CONFIG.bridgeSecret ? "configured" : "not set"}`);
+    log(`  Tenant mode : ${CONFIG.requireTenant ? "required" : "optional"} (default=${CONFIG.defaultTenant})`);
+    log(`  Base path   : ${CONFIG.bridgeBasePath || "/"}`);
+    log(`  Max file MB : ${CONFIG.maxFileMB}`);
+    log(`  Max chunk MB: ${CONFIG.maxChunkMB}`);
+    log(`  Cache TTL h : ${CONFIG.cacheTtlHours}`);
+    log(`  Cache dir   : ${CACHE_ROOT_DIR}`);
+    log(`  External URL: ${CONFIG.bridgeUrl || "(auto-detect from Host header)"}`);
+    if (bridgeUrlRawFromEnv && !CONFIG.bridgeUrl) {
+      log(`  NOTE: Ignored placeholder BRIDGE_URL="${bridgeUrlRawFromEnv}", using request host instead.`);
+    }
+    log("===========================================");
+  });
+}
+
+startServer().catch((err) => {
+  log(`Failed to start server: ${err.stack || err.message}`);
+  process.exit(1);
 });

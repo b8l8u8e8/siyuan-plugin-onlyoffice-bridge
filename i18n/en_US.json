@@ -44,6 +44,6 @@
   "settings.enableEditDesc": "Show 'Edit' option in context menus",
   "message.syncPullPending": "Detected a save event for {{name}}, but it has not been written back to SiYuan yet. Bridge cache is kept to avoid data loss. Please retry shortly.",
   "message.syncWritebackFailed": "Failed to write {{name}} back to SiYuan: {{error}}. Bridge cache is kept to avoid data loss. Please resolve the issue and retry.",
-  "message.closeBlockedUnsynced": "{{name}} still has unsaved or unsynced changes. Click Save in ONLYOFFICE and wait for sync to finish before closing.",
+  "message.closeBlockedUnsynced": "{{name}} has unsaved or unsynced changes, so it cannot be closed yet.",
   "message.requestSaveFailed": "Failed to save \"{{name}}\": {{error}}"
 }

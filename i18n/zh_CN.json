@@ -44,6 +44,6 @@
   "settings.enableEditDesc": "在右键菜单中显示\"编辑\"选项",
   "message.syncPullPending": "该文件上一次编辑的同步仍在进行中，请稍等片刻。",
   "message.syncWritebackFailed": "打开 Office 编辑器失败：{{error}}",
-  "message.closeBlockedUnsynced": "该文件上一次编辑的同步仍在进行中，请稍等片刻。",
+  "message.closeBlockedUnsynced": "“{{name}}”仍有未保存或未同步的更改，暂时无法关闭。",
   "message.requestSaveFailed": "保存“{{name}}”失败：{{error}}"
 }

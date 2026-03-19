@@ -5,7 +5,7 @@
  *   1. Plugin reads the document from SiYuan (browser → SiYuan, internal)
  *   2. Plugin uploads it to Bridge (browser → Bridge, public)
  *   3. Bridge serves it to ONLYOFFICE (Bridge → ONLYOFFICE, public/same host)
- *   4. On save: ONLYOFFICE → Bridge callback → Bridge stores in memory
+ *   4. On save: ONLYOFFICE → Bridge callback → Bridge stores on disk cache
  *   5. Plugin pulls saved file from Bridge → writes back to SiYuan
  */
 
@@ -91,7 +91,7 @@ const FALLBACK_I18N = Object.freeze({
   "message.syncWritebackFailed":
     "Failed to write {{name}} back to SiYuan: {{error}}. Bridge cache is kept to avoid data loss. Please resolve the issue and retry.",
   "message.closeBlockedUnsynced":
-    "{{name}} still has unsaved or unsynced changes. Click Save in ONLYOFFICE and wait for sync to finish before closing.",
+    "{{name}} has unsaved or unsynced changes, so it cannot be closed yet.",
   "message.requestSaveFailed":
     "Failed to save \"{{name}}\": {{error}}",
 });
@@ -757,7 +757,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
     });
   }
 
-  async _uploadAssetInChunks(asset, fileBlob, contentType, onProgress) {
+  async _uploadAssetInChunks(asset, fileBlob, contentType, onProgress, sourceValidators = null) {
     const chunkSizes = [2 * 1024 * 1024, 1024 * 1024, 768 * 1024, 512 * 1024, 256 * 1024];
     let lastErr = null;
     const totalSize = Math.max(1, fileBlob.size);
@@ -780,6 +780,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
             totalChunks: String(totalChunks),
             contentType,
           });
+          this._appendSourceValidatorParams(params, sourceValidators);
           params.set("tenant", this._tenantId());
           if (this.settings.bridgeSecret) params.set("secret", this.settings.bridgeSecret);
 
@@ -813,6 +814,134 @@ class OnlyOfficeBridgePlugin extends Plugin {
       }
     }
     throw lastErr || new Error("Chunk upload failed");
+  }
+
+  _normalizeValidatorValue(v, maxLen = 512) {
+    const s = String(v || "").trim();
+    if (!s) return "";
+    return s.slice(0, maxLen);
+  }
+
+  _parsePositiveInt(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }
+
+  _extractSourceValidatorsFromHeaders(headers) {
+    if (!headers || typeof headers.get !== "function") {
+      return { etag: "", lastModified: "", size: 0 };
+    }
+    const etag = this._normalizeValidatorValue(headers.get("etag") || "");
+    const lastModified = this._normalizeValidatorValue(headers.get("last-modified") || "");
+    const size = this._parsePositiveInt(headers.get("content-length") || "0");
+    return { etag, lastModified, size };
+  }
+
+  _appendSourceValidatorParams(params, validators) {
+    if (!params || !validators) return;
+    const etag = this._normalizeValidatorValue(validators.etag || "");
+    const lastModified = this._normalizeValidatorValue(validators.lastModified || "");
+    const size = this._parsePositiveInt(validators.size || 0);
+    if (etag) params.set("sourceEtag", etag);
+    if (lastModified) params.set("sourceLastModified", lastModified);
+    if (size > 0) params.set("sourceSize", String(size));
+  }
+
+  async _getBridgeCacheMeta(asset) {
+    const sp = this._bridgeAuthPrefix();
+    const url = `${this.settings.bridgeUrl}/cache?${sp}asset=${encodeURIComponent(asset)}&t=${Date.now()}`;
+    const resp = await fetch(url, { cache: "no-store" });
+    if (!resp.ok) {
+      throw new Error(`Bridge /cache returned HTTP ${resp.status}`);
+    }
+    let data = null;
+    try {
+      data = await resp.json();
+    } catch {}
+    if (!data || typeof data !== "object" || typeof data.cached !== "boolean") {
+      throw new Error("Bridge /cache returned an unexpected response");
+    }
+    return data;
+  }
+
+  async _fetchSiyuanSourceValidators(asset) {
+    const siyuanBase = this._siyuanBaseUrl();
+    if (!siyuanBase) return null;
+    const token = globalThis?.siyuan?.config?.api?.token;
+    const headers = token ? { "Authorization": `Token ${token}` } : {};
+    const sourceUrl = `${siyuanBase}/${encodeAssetPath(asset)}?t=${Date.now()}`;
+    const ctrl = new AbortController();
+    try {
+      const resp = await fetch(sourceUrl, { method: "GET", headers, cache: "no-store", signal: ctrl.signal });
+      if (!resp.ok) return null;
+      const validators = this._extractSourceValidatorsFromHeaders(resp.headers);
+      try { ctrl.abort(); } catch {}
+      try { await resp.body?.cancel?.(); } catch {}
+      return validators;
+    } catch {
+      return null;
+    }
+  }
+
+  async _fetchSiyuanSourceValidatorsAfterWrite(asset) {
+    let previous = null;
+    try {
+      previous = await this._getBridgeCacheMeta(asset);
+    } catch {}
+    const prevEtag = this._normalizeValidatorValue(previous?.sourceEtag || "");
+    const prevLastModified = this._normalizeValidatorValue(previous?.sourceLastModified || "");
+    const prevSize = this._parsePositiveInt(previous?.sourceSize || 0);
+    const prevStrong = !!(prevEtag || prevLastModified);
+
+    const delays = [0, 200, 600, 1200];
+    let fallback = null;
+    for (const delay of delays) {
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      const current = await this._fetchSiyuanSourceValidators(asset);
+      if (!current) continue;
+      if (!fallback) fallback = current;
+
+      const etag = this._normalizeValidatorValue(current.etag || "");
+      const lastModified = this._normalizeValidatorValue(current.lastModified || "");
+      const size = this._parsePositiveInt(current.size || 0);
+      const strong = !!(etag || lastModified);
+      if (!strong) continue;
+
+      if (!prevStrong) return current;
+
+      const changed =
+        (!!prevEtag && !!etag && prevEtag !== etag) ||
+        (!!prevLastModified && !!lastModified && prevLastModified !== lastModified) ||
+        (prevSize > 0 && size > 0 && prevSize !== size);
+      if (changed) return current;
+    }
+    return fallback;
+  }
+
+  _canReuseBridgeCache(cacheMeta, currentValidators) {
+    if (!cacheMeta || !cacheMeta.cached || cacheMeta.dirty) return false;
+    const etagA = this._normalizeValidatorValue(cacheMeta.sourceEtag || "");
+    const etagB = this._normalizeValidatorValue(currentValidators?.etag || "");
+    const lmA = this._normalizeValidatorValue(cacheMeta.sourceLastModified || "");
+    const lmB = this._normalizeValidatorValue(currentValidators?.lastModified || "");
+    const sizeA = this._parsePositiveInt(cacheMeta.sourceSize || 0);
+    const sizeB = this._parsePositiveInt(currentValidators?.size || 0);
+
+    let strongCompared = 0;
+    if (etagA && etagB) {
+      strongCompared += 1;
+      if (etagA !== etagB) return false;
+    }
+    if (lmA && lmB) {
+      strongCompared += 1;
+      if (lmA !== lmB) return false;
+    }
+    if (strongCompared === 0) return false;
+    if (sizeA > 0 && sizeB > 0 && sizeA !== sizeB) {
+      return false;
+    }
+    return true;
   }
 
   async _prepareAssetOnBridge(asset, updateLoading) {
@@ -869,6 +998,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
         }
       }
 
+      const cacheMeta = await this._getBridgeCacheMeta(asset);
+      const sourceValidatorsForCacheCheck = await this._fetchSiyuanSourceValidators(asset);
+      if (this._canReuseBridgeCache(cacheMeta, sourceValidatorsForCacheCheck)) {
+        console.info(`[Office Editor] Reusing bridge cache for "${asset}"`);
+        return;
+      }
+
       const siyuanBase = this._siyuanBaseUrl();
       if (!siyuanBase) throw new Error("Cannot determine SiYuan URL");
       const token = globalThis?.siyuan?.config?.api?.token;
@@ -876,10 +1012,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
       const sourceUrl = `${siyuanBase}/${encodeAssetPath(asset)}?t=${Date.now()}`;
       const sourceResp = await fetch(sourceUrl, { headers, cache: "no-store" });
       if (!sourceResp.ok) throw new Error(`SiYuan returned HTTP ${sourceResp.status}`);
+      const sourceValidators = this._extractSourceValidatorsFromHeaders(sourceResp.headers);
       const fileBlob = await sourceResp.blob();
       await validateSourceBlob(asset, fileBlob);
 
-      const uploadUrl = `${this.settings.bridgeUrl}/upload?asset=${encodeURIComponent(asset)}${this._secretParam()}`;
+      const uploadParams = new URLSearchParams({ asset });
+      this._appendSourceValidatorParams(uploadParams, sourceValidators);
+      const uploadUrl = `${this.settings.bridgeUrl}/upload?${uploadParams.toString()}${this._secretParam()}`;
       const contentType = extMime(getExt(asset)) || fileBlob.type || "application/octet-stream";
       const canChunkUpload = !!(
         bridgeHealth &&
@@ -906,7 +1045,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
       };
 
       if (useChunkByHint) {
-        const fallback = await this._uploadAssetInChunks(asset, fileBlob, contentType, updateUploadProgress);
+        const fallback = await this._uploadAssetInChunks(
+          asset,
+          fileBlob,
+          contentType,
+          updateUploadProgress,
+          sourceValidators
+        );
         console.info(`[Office Editor] Chunk upload (hint) succeeded for "${asset}" (${fallback.totalChunks} chunks @ ${fallback.chunkSize} bytes)`);
         return;
       }
@@ -936,7 +1081,13 @@ class OnlyOfficeBridgePlugin extends Plugin {
             );
           }
           try {
-            const fallback = await this._uploadAssetInChunks(asset, fileBlob, contentType, updateUploadProgress);
+            const fallback = await this._uploadAssetInChunks(
+              asset,
+              fileBlob,
+              contentType,
+              updateUploadProgress,
+              sourceValidators
+            );
             console.info(`[Office Editor] Chunk upload fallback succeeded for "${asset}" (${fallback.totalChunks} chunks @ ${fallback.chunkSize} bytes)`);
             return;
           } catch (chunkErr) {
@@ -1028,7 +1179,8 @@ class OnlyOfficeBridgePlugin extends Plugin {
       this._saveSignalAssets.has(asset) ||
       !!(pendingTimers && pendingTimers.length);
     if (this._postCloseSyncing.has(asset) && hasPendingSave) {
-      showMessage(this.t("message.fileSyncInProgress"), 4000, "info");
+      // Avoid noisy duplicate notices while post-close sync is still settling.
+      // We keep the guard behavior (do not re-open yet) but stay silent.
       return;
     }
 
@@ -1262,7 +1414,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
     if (!iframe.classList.contains("oo-bridge-embed__frame")) {
       iframe.classList.add("oo-bridge-embed__frame");
     }
-    iframe.setAttribute("src", nextFrameSrc);
+    this._setIframeSrcIfNeeded(iframe, nextFrameSrc);
     iframe.setAttribute("allow", "clipboard-read; clipboard-write; fullscreen");
     iframe.setAttribute("data-oo-asset", meta.asset);
     iframe.setAttribute("data-oo-mode", meta.mode);
@@ -1273,6 +1425,14 @@ class OnlyOfficeBridgePlugin extends Plugin {
     host.setAttribute("data-oo-title", meta.displayName || fileName(meta.asset));
 
     return template.innerHTML;
+  }
+
+  _setIframeSrcIfNeeded(iframe, nextFrameSrc) {
+    if (!iframe || !nextFrameSrc) return;
+    const currentSrc = String(iframe.getAttribute("src") || "").trim();
+    const nextSrc = String(nextFrameSrc || "").trim();
+    if (!nextSrc || currentSrc === nextSrc) return;
+    iframe.setAttribute("src", nextSrc);
   }
 
   async _hydrateSingleEmbed(el) {
@@ -1320,7 +1480,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
             (!currentMeta && uniqueIframes.length === 1)
           );
           if (!isTarget) continue;
-          iframe.setAttribute("src", frameSrc);
+          this._setIframeSrcIfNeeded(iframe, frameSrc);
           iframe.setAttribute("allow", "clipboard-read; clipboard-write; fullscreen");
           iframe.setAttribute("data-oo-asset", meta.asset);
           iframe.setAttribute("data-oo-mode", mode);
@@ -1381,7 +1541,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
     try {
       await this._prepareAssetOnBridge(asset);
       const frameSrc = this._buildFrameSrc(asset, mode, displayName);
-      iframe.setAttribute("src", frameSrc);
+      this._setIframeSrcIfNeeded(iframe, frameSrc);
       iframe.setAttribute("data-oo-asset", asset);
       iframe.setAttribute("data-oo-mode", mode);
       iframe.setAttribute("data-oo-title", displayName);
@@ -1448,6 +1608,10 @@ class OnlyOfficeBridgePlugin extends Plugin {
           name,
           error: errorText || "unknown error",
         });
+    if (pendingOnly) {
+      // Pending-only means callback lag / eventual consistency; don't toast.
+      return;
+    }
     showMessage(msg, 10000, "error");
   }
 
@@ -1478,7 +1642,7 @@ class OnlyOfficeBridgePlugin extends Plugin {
     const key = String(asset || "");
     if (!key) return;
     this._markAssetSettled(key);
-    await this._cleanupBridgeFile(key);
+    await this._cleanupBridgeFile(key, null, { purge: true });
   }
 
   _postMessageToAssetFrames(asset, payload) {
@@ -1822,8 +1986,10 @@ class OnlyOfficeBridgePlugin extends Plugin {
       this._saveSignalAssets.delete(asset);
       this._dirtyAssets.delete(asset);
       this._syncAlertAt.delete(asset);
+      const sourceValidators = await this._fetchSiyuanSourceValidatorsAfterWrite(asset);
+      await this._cleanupBridgeFile(asset, sourceValidators);
       console.info(`[Office Editor] Synced "${asset}" back to SiYuan`);
-      return { changed: true };
+      return { changed: true, sourceValidators };
     } finally {
       this._syncInFlight.delete(asset);
     }
@@ -1874,13 +2040,18 @@ class OnlyOfficeBridgePlugin extends Plugin {
   }
 
   // -----------------------------------------------------------------------
-  // Clean up Bridge memory after session
+  // Clear Bridge session state after sync (cache retained until TTL)
   // -----------------------------------------------------------------------
-  async _cleanupBridgeFile(asset) {
+  async _cleanupBridgeFile(asset, sourceValidators = null, options = {}) {
     try {
       const sp = this._bridgeAuthPrefix();
+      const base = sp ? sp.slice(0, -1) : "";
+      const params = new URLSearchParams(base);
+      params.set("asset", String(asset || ""));
+      if (options?.purge) params.set("purge", "1");
+      this._appendSourceValidatorParams(params, sourceValidators);
       await fetch(
-        `${this.settings.bridgeUrl}/cleanup?${sp}asset=${encodeURIComponent(asset)}`,
+        `${this.settings.bridgeUrl}/cleanup?${params.toString()}`,
         { method: "POST" }
       );
     } catch {
