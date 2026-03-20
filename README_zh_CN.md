@@ -108,4 +108,5 @@
 - 🐞 问题反馈：[GitHub Issues](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/issues)
 - 📄 开源协议：[MIT License](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/LICENSE)
 - 🧾 更新日志：[CHANGELOG.md](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/CHANGELOG.md)
+- 💖 赞助列表：[Sponsor List](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/sponsor-list.md)
 

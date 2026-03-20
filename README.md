@@ -107,3 +107,4 @@ Your support will encourage me to **continue maintaining and improving** this to
 - 🐞 Issue Tracker：[GitHub Issues](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/issues)
 - 📄 License：[MIT License](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/LICENSE)
 - 🧾 Changelog：[CHANGELOG.md](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/CHANGELOG.md)
+- 💖 Sponsor List: [Sponsor List](https://github.com/b8l8u8e8/siyuan-plugin-onlyoffice-bridge/blob/main/sponsor-list.md)
