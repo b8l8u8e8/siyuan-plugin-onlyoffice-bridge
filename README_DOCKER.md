@@ -47,7 +47,7 @@ cd siyuan-plugin-onlyoffice-bridge
 ### 2. 查看与修改docker-compose.yml配置
 
 默认配置为`127.0.0.1`，如需公网访问，请自行配置反向代理。
-如果已经部署过，修改了下方配置后请在项目目录执行 `docker compose up -d --force-recreate` 使新配置生效，若同时改了 Bridge 镜像或代码，请改用 `docker compose up -d --build --force-recreate`。
+如果已经部署过，修改了下方配置后请在项目目录执行 `docker compose up -d --force-recreate --remove-orphans` 使新配置生效，若同时改了 Bridge 镜像或代码，请改用 `docker compose up -d --build --force-recreate --remove-orphans`。
 
 ```yaml
 services:
@@ -57,6 +57,13 @@ services:
       - "27670:80"                    # 宿主机端口:容器端口
     volumes:
       - ./server/onlyoffice-bootstrap.sh:/app/onlyoffice-bootstrap.sh:ro
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_logs:/var/log/onlyoffice
+      - onlyoffice_lib:/var/lib/onlyoffice
+      - onlyoffice_db:/var/lib/postgresql
+      - onlyoffice_rabbitmq:/var/lib/rabbitmq
+      - onlyoffice_redis:/var/lib/redis
+      - onlyoffice_fonts:/usr/share/fonts/truetype/custom
     entrypoint:
       - /bin/bash
       - /app/onlyoffice-bootstrap.sh
@@ -83,6 +90,15 @@ services:
     depends_on:
       - onlyoffice
     restart: unless-stopped
+
+volumes:
+  onlyoffice_data:
+  onlyoffice_logs:
+  onlyoffice_lib:
+  onlyoffice_db:
+  onlyoffice_rabbitmq:
+  onlyoffice_redis:
+  onlyoffice_fonts:
 ```
 
 ### 3. 启动服务
@@ -134,12 +150,8 @@ curl http://127.0.0.1:27689/health?detail=true
 # 根据提示处理完成后，再次执行 git pull 即可。
 git pull
 
-# 停止服务
-docker compose down
-
-# 重新构建 Bridge 镜像并启动
-docker compose build bridge
-docker compose up -d
+# 按新配置重建并启动
+docker compose up -d --build --force-recreate --remove-orphans
 ```
 
 ---

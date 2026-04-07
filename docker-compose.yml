@@ -5,6 +5,13 @@ services:
       - "27670:80"
     volumes:
       - ./server/onlyoffice-bootstrap.sh:/app/onlyoffice-bootstrap.sh:ro
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_logs:/var/log/onlyoffice
+      - onlyoffice_lib:/var/lib/onlyoffice
+      - onlyoffice_db:/var/lib/postgresql
+      - onlyoffice_rabbitmq:/var/lib/rabbitmq
+      - onlyoffice_redis:/var/lib/redis
+      - onlyoffice_fonts:/usr/share/fonts/truetype/custom
     entrypoint:
       - /bin/bash
       - /app/onlyoffice-bootstrap.sh
@@ -45,3 +52,12 @@ services:
     depends_on:
       - onlyoffice
     restart: unless-stopped
+
+volumes:
+  onlyoffice_data:
+  onlyoffice_logs:
+  onlyoffice_lib:
+  onlyoffice_db:
+  onlyoffice_rabbitmq:
+  onlyoffice_redis:
+  onlyoffice_fonts:
